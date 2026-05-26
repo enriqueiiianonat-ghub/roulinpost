@@ -16,64 +16,49 @@ app = FastAPI(title="EZGEE Social API")
 
 app.add_middleware(
     CORSMiddleware,
-<<<<<<< Updated upstream
-    allow_origins=["*"],
-=======
     allow_origins=[
         "https://roulinpost.com",
         "https://www.roulinpost.com",
         "http://localhost:5000",
         "http://localhost:8000",
     ],
->>>>>>> Stashed changes
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- UPGRADED: Flexible Firebase Cloud/Local Initialisation Matrix ---
-CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-e7ce47abd7.json"
+# --- Updated Firebase Initialisation with Render Secret Paths ---
+
+LOCAL_CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-e7ce47abd7.json"
+RENDER_SECRET_PATH = "/etc/secrets/meshmeedb-firebase-adminsdk-fbsvc-e7ce47abd7.json"
 BUCKET_NAME = "meshmeedb.firebasestorage.app"
 
 if not firebase_admin._apps:
-    # Check if running on Render production cloud environment
-    if os.environ.get("FIREBASE_CREDENTIALS"):
-        try:
-            fb_config_dict = py_json.loads(os.environ.get("FIREBASE_CREDENTIALS"))
-            cred = credentials.Certificate(fb_config_dict)
-            print("🚀 Firebase connected successfully via Render Environment Variable!")
-        except Exception as e:
-            print(f"❌ Failed parsing FIREBASE_CREDENTIALS environment variable: {e}")
-            cred = credentials.Certificate(CERT_PATH)
+    # 1. First, check if the file is sitting inside Render's secure secret vault directory
+    if os.path.exists(RENDER_SECRET_PATH):
+        cred = credentials.Certificate(RENDER_SECRET_PATH)
+        print("🚀 Firebase connected securely via Render Secret File path!")
+    # 2. Fall back to your local workspace file if testing on your computer
+    elif os.path.exists(LOCAL_CERT_PATH):
+        cred = credentials.Certificate(LOCAL_CERT_PATH)
+        print("💻 Firebase connected successfully via local workspace JSON key.")
     else:
-        # Fallback to local file environment path
-        cred = credentials.Certificate(CERT_PATH)
-        print("💻 Firebase connected successfully via local fallback JSON key.")
+        raise FileNotFoundError("Could not find Firebase credentials file in local or cloud environments.")
 
     firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
 
 db_fs = firestore.client()
 
 # --- SMTP Configuration Matrix ---
-<<<<<<< Updated upstream
-=======
 # --- Updated SMTP Configuration Matrix inside database.py ---
->>>>>>> Stashed changes
 mail_config = ConnectionConfig(
     MAIL_USERNAME="enriqueiiianonat@gmail.com",
     MAIL_PASSWORD="tvcu lhwz qnbk qusx",
     MAIL_FROM="king@devgloyd.com",
-<<<<<<< Updated upstream
-    MAIL_PORT=587,
-    MAIL_SERVER="smtp.gmail.com",
-    MAIL_STARTTLS=True,
-    MAIL_SSL_TLS=False,
-=======
     MAIL_PORT=465,                    #  Change 587 to 465
     MAIL_SERVER="smtp.gmail.com",
     MAIL_STARTTLS=False,              #  Change True to False
     MAIL_SSL_TLS=True,                #  Change False to True
->>>>>>> Stashed changes
     USE_CREDENTIALS=True,
     VALIDATE_CERTS=True
 )
@@ -143,10 +128,7 @@ def process_and_upload_avatar(file_bytes: bytes) -> str:
 
 # --- API Endpoints ---
 
-<<<<<<< Updated upstream
-=======
 @app.post("/api/register")
->>>>>>> Stashed changes
 @app.post("/auth/register")
 async def register(user: UserRegister):
     clean_username = user.username.strip().lower()
@@ -189,11 +171,7 @@ async def register(user: UserRegister):
         db_fs.collection('unverified_users').document(clean_username).delete()
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
 
-<<<<<<< Updated upstream
-@app.post("/auth/verify-otp")
-=======
 @app.post("/api/verify-otp")
->>>>>>> Stashed changes
 def verify_otp(payload: VerifyOTP):
     target_username = payload.username.strip().lower()
     unverified_ref = db_fs.collection('unverified_users').document(target_username)
