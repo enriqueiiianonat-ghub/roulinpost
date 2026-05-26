@@ -1,20 +1,12 @@
-import os
-import random
-import io
-import uuid
-import json as py_json
-import smtplib
-from email.mime.text import MIMEText
-from typing import List, Optional
-from pydantic import BaseModel, EmailStr
-from PIL import Image, ImageOps
-
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
-
+from pydantic import BaseModel, EmailStr
+from typing import List, Optional
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
+import io
+import uuid
+from PIL import Image, ImageOps
 
 app = FastAPI(title="EZGEE Social API")
 
@@ -27,54 +19,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Firebase Secure Initialisation ---
-LOCAL_CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-e7ce47abd7.json"
-RENDER_SECRET_PATH = "/etc/secrets/meshmeedb-firebase-adminsdk-fbsvc-e7ce47abd7.json"
+# --- Firebase Initialisation ---
+CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-e7ce47abd7.json"
 BUCKET_NAME = "meshmeedb.firebasestorage.app"
 
 if not firebase_admin._apps:
-    if os.path.exists(RENDER_SECRET_PATH):
-        cred = credentials.Certificate(RENDER_SECRET_PATH)
-        print("🚀 Firebase connected securely via Render Secret File path!")
-    elif os.path.exists(LOCAL_CERT_PATH):
-        cred = credentials.Certificate(LOCAL_CERT_PATH)
-        print("💻 Firebase connected successfully via local workspace JSON key.")
-    else:
-        raise FileNotFoundError("Could not find Firebase credentials file.")
-
+    cred = credentials.Certificate(CERT_PATH)
     firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
 
 db_fs = firestore.client()
 
-# --- Secure SMTP Configuration Engine ---
-mail_config = ConnectionConfig(
-    MAIL_USERNAME="enriqueiiianonat@gmail.com",
-    MAIL_PASSWORD="tvcu lhwz qnbk qusx",
-    MAIL_FROM="enriqueiiianonat@gmail.com",
-    MAIL_FROM_NAME="ROULIN POST",
-    MAIL_PORT=465,
-    MAIL_SERVER="smtp.gmail.com",
-    MAIL_STARTTLS=False,
-    MAIL_SSL_TLS=True,
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=True
-)
-
-# --- Pydantic Data Matrix Models ---
+# --- Pydantic Schemas ---
 class UserRegister(BaseModel):
     username: str
     email: EmailStr
     password: str
 
-class VerifyOTP(BaseModel):
-    username: str
-    otp_code: str
-
 class UserLogin(BaseModel):
     username: str
     password: str
 
-# --- Helper Functions (Image Processing Engines) ---
+class ProfileUpdate(BaseModel):
+    new_username: str
+    new_email: EmailStr
+    new_password: Optional[str] = None
+
+# --- Helper Functions (Image Processing) ---
 def process_and_upload_image(file_bytes: bytes) -> str:
     try:
         img = Image.open(io.BytesIO(file_bytes))
@@ -95,100 +65,28 @@ def process_and_upload_image(file_bytes: bytes) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
-# --- Production API Route Definitions ---
+# --- API Endpoints ---
 
-@app.post("/api/register")
 @app.post("/auth/register")
-async def register(user: UserRegister):
-    clean_username = user.username.strip().lower()
-    
-    # Check if they are already fully verified users
-    user_ref = db_fs.collection('users').document(clean_username)
+def register(user: UserRegister):
+    user_ref = db_fs.collection('users').document(user.username)
     if user_ref.get().exists:
-        raise HTTPException(status_code=400, detail="Username is already taken.")
+        raise HTTPException(status_code=400, detail="Username already exists")
     
-    otp_code = f"{random.randint(100000, 999999)}"
-    
-    # Secure Quarantine: Save to unverified bucket pool first!
-    db_fs.collection('unverified_users').document(clean_username).set({
-        'username': clean_username,
+    user_ref.set({
+        'username': user.username,
         'email': user.email,
-        'password': user.password,
-        'otp_code': otp_code,
+        'password': user.password, # Note: In production, hash this using passlib!
         'created_at': firestore.SERVER_TIMESTAMP
     })
-
-    email_html = f"""
-    <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-        <h2 style="color: #607d8b;">ROULIN POST — Email Verification</h2>
-        <p>Thank you for signing up! Use the verification pin below to complete your registration:</p>
-        <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; margin: 20px 0; border-radius: 4px;">
-            {otp_code}
-        </div>
-        <p style="color: #777; font-size: 12px;">If you didn't request this code, you can safely ignore this email.</p>
-    </div>
-    """
-    
-    # --- Native Secure Python SMTP Engine Block ---
-    msg = MIMEText(email_html, "html")
-    msg["Subject"] = "ROULIN POST - Verify Your Account"
-    msg["From"] = "ROULIN POST <enriqueiiianonat@gmail.com>"
-    msg["To"] = user.email
-
-    try:
-        # Connect natively via SSL straight to port 465
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login("enriqueiiianonat@gmail.com", "wssw nxsa bamf fpqg")
-            server.sendmail("enriqueiiianonat@gmail.com", [user.email], msg.as_string())
-            
-        return {"message": "OTP verification code sent to email."}
-    except Exception as e:
-        # Roll back database creation if mail transport fails
-        db_fs.collection('unverified_users').document(clean_username).delete()
-        raise HTTPException(status_code=500, detail=f"Mail delivery failed: {str(e)}")
-
-@app.post("/api/verify-otp")
-@app.post("/auth/verify-otp")
-def verify_otp(payload: VerifyOTP):
-    target_username = payload.username.strip().lower()
-    unverified_ref = db_fs.collection('unverified_users').document(target_username)
-    snap = unverified_ref.get()
-    
-    if not snap.exists:
-        raise HTTPException(status_code=404, detail="Registration session expired or user entry token invalid.")
-        
-    data = snap.to_dict()
-    if data.get("otp_code") != payload.otp_code.strip():
-        raise HTTPException(status_code=400, detail="Invalid verification code mismatch.")
-        
-    # Promote data payload record to primary verified production pool
-    db_fs.collection('users').document(target_username).set({
-        'username': data['username'],
-        'email': data['email'],
-        'password': data['password'],
-        'profile_url': "",
-        'created_at': firestore.SERVER_TIMESTAMP
-    })
-    
-    unverified_ref.delete()
-    return {"message": "Email authenticated! You can now log in."}
+    return {"message": "Registration successful"}
 
 @app.post("/auth/login")
 def login(user: UserLogin):
-    login_username = user.username.strip().lower()
-    if db_fs.collection('unverified_users').document(login_username).get().exists:
-        raise HTTPException(status_code=401, detail="Account not verified. Please check your mailbox profile folder.")
-
-    user_ref = db_fs.collection('users').document(login_username).get()
+    user_ref = db_fs.collection('users').document(user.username).get()
     if not user_ref.exists or user_ref.to_dict().get("password") != user.password:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials.")
-        
-    u_data = user_ref.to_dict()
-    return {
-        "username": login_username, 
-        "email": u_data.get("email"),
-        "profile_url": u_data.get("profile_url", "")
-    }
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"username": user.username, "email": user_ref.to_dict().get("email")}
 
 @app.get("/posts")
 def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
@@ -197,6 +95,7 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
         query = query.where(filter=firestore.FieldFilter("username", "==", username))
     
     docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
+    
     posts = []
     for doc in docs:
         d = doc.to_dict()
@@ -236,7 +135,7 @@ async def create_post(
 def like_post(post_id: str):
     post_ref = db_fs.collection('posts').document(post_id)
     if not post_ref.get().exists:
-        raise HTTPException(status_code=404, detail="Post target map missing.")
+        raise HTTPException(status_code=404, detail="Post not found")
     post_ref.update({'likes': firestore.Increment(1)})
     return {"message": "Liked"}
 
@@ -247,6 +146,50 @@ def delete_post(post_id: str, username: str):
     if not snap.exists:
         raise HTTPException(status_code=404, detail="Post not found")
     if snap.to_dict().get("username") != username:
-        raise HTTPException(status_code=403, detail="Unauthorized route call context execution.")
+        raise HTTPException(status_code=403, detail="Unauthorized execution")
+        
+    # Delete storage assets
+    bucket = storage.bucket()
+    for url in snap.to_dict().get("image_urls", []):
+        try:
+            file_name = url.split("/")[-1].split("?")[0]
+            bucket.blob(f"posts/{file_name}").delete()
+        except:
+            pass
+            
     post_ref.delete()
     return {"message": "Deleted"}
+
+
+@app.put("/auth/profile/{current_username}")
+def update_profile(current_username: str, profile: ProfileUpdate):
+    # 1. Fetch current user record
+    user_ref = db_fs.collection('users').document(current_username)
+    snap = user_ref.get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="User profile not found")
+
+    # 2. Handle Username Migration if changed
+    if profile.new_username != current_username:
+        new_ref = db_fs.collection('users').document(profile.new_username)
+        if new_ref.get().exists:
+            raise HTTPException(status_code=400, detail="New username is already taken")
+        
+        # Move document data over to the new key destination
+        user_data = snap.to_dict()
+        user_data['username'] = profile.new_username
+        user_data['email'] = profile.new_email
+        if profile.new_password:
+            user_data['password'] = profile.new_password
+            
+        new_ref.set(user_data)
+        user_ref.delete() # Remove old record name reference
+        return {"username": profile.new_username, "email": profile.new_email}
+
+    # 3. Handle simple value updates if username remains identical
+    update_payload = {"email": profile.new_email}
+    if profile.new_password:
+        update_payload["password"] = profile.new_password
+        
+    user_ref.update(update_payload)
+    return {"username": current_username, "email": profile.new_email}
