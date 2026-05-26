@@ -45,11 +45,11 @@ if not firebase_admin._apps:
 db_fs = firestore.client()
 
 # --- Secure SMTP Configuration Engine ---
+# --- Secure Clean SMTP Configuration Matrix inside main.py ---
 mail_config = ConnectionConfig(
     MAIL_USERNAME="enriqueiiianonat@gmail.com",
     MAIL_PASSWORD="tvcu lhwz qnbk qusx",
     MAIL_FROM="enriqueiiianonat@gmail.com",
-    MAIL_FROM_NAME="ROULIN POST",
     MAIL_PORT=465,
     MAIL_SERVER="smtp.gmail.com",
     MAIL_STARTTLS=False,
