@@ -46,16 +46,17 @@ db_fs = firestore.client()
 
 # --- Secure SMTP Configuration Engine ---
 # --- Secure Clean SMTP Configuration Matrix inside main.py ---
+# --- Secure Clean SMTP Configuration Matrix inside main.py ---
 mail_config = ConnectionConfig(
     MAIL_USERNAME="enriqueiiianonat@gmail.com",
     MAIL_PASSWORD="tvcu lhwz qnbk qusx",
     MAIL_FROM="enriqueiiianonat@gmail.com",
     MAIL_PORT=465,
-    MAIL_SERVER="smtp.gmail.com",
+    MAIL_SERVER="173.194.77.108",  #  Using Gmail's direct secure SMTP IP address bypasses the DNS lookup error
     MAIL_STARTTLS=False,
     MAIL_SSL_TLS=True,
     USE_CREDENTIALS=True,
-    VALIDATE_CERTS=False
+    VALIDATE_CERTS=True            #  Must be True when using the direct IP endpoint matrix
 )
 
 # --- Pydantic Data Matrix Models ---
