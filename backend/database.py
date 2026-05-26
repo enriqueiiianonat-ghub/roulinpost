@@ -50,15 +50,16 @@ if not firebase_admin._apps:
 db_fs = firestore.client()
 
 # --- SMTP Configuration Matrix ---
-# --- Updated SMTP Configuration Matrix inside database.py ---
+# --- Updated Secure SMTP Configuration Array inside database.py ---
 mail_config = ConnectionConfig(
     MAIL_USERNAME="enriqueiiianonat@gmail.com",
     MAIL_PASSWORD="tvcu lhwz qnbk qusx",
-    MAIL_FROM="king@devgloyd.com",
-    MAIL_PORT=465,                    #  Change 587 to 465
+    MAIL_FROM="enriqueiiianonat@gmail.com",   #  Update this to match your username exactly!
+    MAIL_FROM_NAME="ROULIN POST",            #  Add this optional tag line for clean email formatting
+    MAIL_PORT=465,
     MAIL_SERVER="smtp.gmail.com",
-    MAIL_STARTTLS=False,              #  Change True to False
-    MAIL_SSL_TLS=True,                #  Change False to True
+    MAIL_STARTTLS=False,
+    MAIL_SSL_TLS=True,
     USE_CREDENTIALS=True,
     VALIDATE_CERTS=True
 )
