@@ -1,0 +1,17 @@
+name: frontend
+description: "EZGEE Social Media Feed App"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  image_picker: ^1.0.7
+
+# ⚠️ THIS IS THE SECTOR WE ADDED TO FIX THE BROKEN ICONS:
+flutter:
+  uses-material-design: true
