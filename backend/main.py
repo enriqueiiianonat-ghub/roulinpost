@@ -35,15 +35,15 @@ db_fs = firestore.client()
 # --- SMTP Configuration Matrix ---
 # IMPORTANT: Remember to replace MAIL_PASSWORD with a generated 16-character Google App Password
 mail_config = ConnectionConfig(
-    MAIL_USERNAME="enriqueiiianonat@gmail.com",
+    MAIL_USERNAME="king@devgloyd.com",
     MAIL_PASSWORD="wssw nxsa bamf fpqg", 
     MAIL_FROM="king@devgloyd.com",
     MAIL_PORT=587,
     MAIL_SERVER="smtp.gmail.com",
     MAIL_STARTTLS=True,
     MAIL_SSL_TLS=False,
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=True
+    USE_CREDENTIALS=True
+    #VALIDATE_CERTS=True
 )
 
 # --- Pydantic Schemas ---
