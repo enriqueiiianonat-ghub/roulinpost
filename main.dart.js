@@ -87013,7 +87013,7 @@ o=this.c
 o.toString
 A.wA(!0,new A.am3(n,this,q,p,new A.hY(m,s),new A.z4(),a),o,r)},
 J(a){var s,r,q,p=this,o=null,n=p.f!=null,m=p.x,l=m!=null,k=l?A.md(o,o,B.FM,o,o,new A.alg(p),o,o,o):o
-m=A.dq(l?"@"+m+"'s Feed":"ROULIN POST - Social Feed",o,o,o,B.zp,o,o)
+m=A.dq(l?"@"+m+"'s Feed":"ROULIN POST",o,o,o,B.zp,o,o)
 s=t.p
 r=A.c([],s)
 if(n)r.push(A.md(o,o,B.FS,o,o,p.ga02(),o,o,"Dashboard Settings"))
