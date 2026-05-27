@@ -6,3 +6,5 @@ email-validator>=2.1.1
 Pillow>=10.4.0
 fastapi-mail>=1.4.1
 python-multipart>=0.0.9
+resend==0.8.0
+resend==2.30.1

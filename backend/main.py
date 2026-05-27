@@ -7,9 +7,12 @@ from firebase_admin import credentials, firestore, storage
 import io
 import uuid
 import random
+import resend
 import json as py_json
 from PIL import Image, ImageOps
-from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
+
+resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
+
 
 app = FastAPI(title="EZGEE Social API")
 
@@ -62,20 +65,7 @@ db_fs = firestore.client()
 
 # --- SMTP Configuration Matrix ---
 # IMPORTANT: Remember to replace MAIL_PASSWORD with a generated 16-character Google App Password
-mail_config = ConnectionConfig(
-    MAIL_USERNAME="king@devgloyd.com",
-    MAIL_PASSWORD="wssw nxsa bamf fpqg",
-    MAIL_FROM="king@devgloyd.com",
 
-    MAIL_SERVER="smtp.gmail.com",
-    MAIL_PORT=465,
-
-    MAIL_STARTTLS=False,
-    MAIL_SSL_TLS=True,
-
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=True
-)
 
 # --- Pydantic Schemas ---
 class UserRegister(BaseModel):
@@ -193,22 +183,26 @@ async def register(user: UserRegister):
         </div>
         """
 
-        message = MessageSchema(
-            subject="ROULIN POST - Verify Your Account",
-            recipients=[user.email],
-            body=email_html,
-            subtype=MessageType.html
-        )
-
-        # DO NOT CRASH IF EMAIL FAILS
         try:
-            fm = FastMail(mail_config)
-            await fm.send_message(message)
+            r = resend.Emails.send({
+                "from": "onboarding@resend.dev",
+                "to": user.email,
+                "subject": "ROULIN POST - Verify Your Account",
+                "html": email_html
+            })
+
             print("EMAIL SENT SUCCESSFULLY")
+            print(r)
 
         except Exception as email_error:
+
             print("EMAIL ERROR:")
             print(str(email_error))
+
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to send OTP email."
+            )
 
         return {
             "message": "Registration successful. OTP process started."
