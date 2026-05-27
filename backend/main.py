@@ -37,13 +37,6 @@ async def validation_exception_handler(
     )
 
 
-
-
-
-
-
-
-
 # --- Enable CORS Globally ---
 app.add_middleware(
     CORSMiddleware,
@@ -184,8 +177,9 @@ async def register(user: UserRegister):
         """
 
         try:
+            # INTEGRATED RESEND IMPLEMENTATION
             response = resend.Emails.send({
-                "from": "onboarding@resend.dev",
+                "from": "no-reply@mail.roulinpost.com",  # Replace with your verified custom domain address
                 "to": user.email,
                 "subject": "ROULIN POST - Verify Your Account",
                 "html": email_html,
