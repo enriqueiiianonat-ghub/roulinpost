@@ -13,6 +13,34 @@ from fastapi_mail import ConnectionConfig, FastMail, MessageSchema, MessageType
 
 app = FastAPI(title="EZGEE Social API")
 
+
+# --- VALIDATION DEBUG HANDLER ---
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi import Request
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError
+):
+    print("========== VALIDATION ERROR ==========")
+    print(exc.errors())
+    print("=====================================")
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+
+
+
+
+
+
+
+
 # --- Enable CORS Globally ---
 app.add_middleware(
     CORSMiddleware,
