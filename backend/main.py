@@ -111,43 +111,87 @@ def process_and_upload_avatar(file_bytes: bytes) -> str:
 
 # --- API Endpoints ---
 
+
 @app.post("/auth/register")
 async def register(user: UserRegister):
-    clean_username = user.username.strip().lower()
-    
-    # Check if the user is already permanently registered
-    user_ref = db_fs.collection('users').document(clean_username)
-    if user_ref.get().exists:
-        raise HTTPException(status_code=400, detail="Username is already taken.")
-        
-    otp_code = f"{random.randint(100000, 999999)}"
-    
-    email_html = f"""
-    <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-        <h2 style="color: #607d8b;">ROULIN POST — Email Verification</h2>
-        <p>Thank you for signing up! Use the code below to complete your registration and activate your account:</p>
-        <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; margin: 20px 0; border-radius: 4px;">
-            {otp_code}
-        </div>
-        <p style="color: #777; font-size: 12px;">If you didn't request this code, you can safely ignore this email.</p>
-    </div>
-    """
-    
-    message = MessageSchema(
-        subject="ROULIN POST - Verify Your Account",
-        recipients=[user.email],
-        body=email_html,
-        subtype=MessageType.html
-    )
-
-    # Dispatch email before touching the database staging area
     try:
-        fm = FastMail(mail_config)
-        await fm.send_message(message)
+        clean_username = user.username.strip().lower()
+
+        # Check existing user
+        user_ref = db_fs.collection('users').document(clean_username)
+        if user_ref.get().exists:
+            raise HTTPException(
+                status_code=400,
+                detail="Username is already taken."
+            )
+
+        # Check pending verification
+        pending_ref = db_fs.collection('unverified_users').document(clean_username)
+        if pending_ref.get().exists:
+            pending_ref.delete()
+
+        otp_code = f"{random.randint(100000, 999999)}"
+
+        # Save FIRST before email
+        db_fs.collection('unverified_users').document(clean_username).set({
+            'username': clean_username,
+            'email': user.email,
+            'password': user.password,
+            'otp_code': otp_code,
+            'created_at': firestore.SERVER_TIMESTAMP
+        })
+
+        # Email template
+        email_html = f"""
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+            <h2>ROULIN POST — Email Verification</h2>
+            <p>Your OTP code is:</p>
+
+            <div style="
+                font-size: 30px;
+                font-weight: bold;
+                padding: 20px;
+                background: #f2f2f2;
+                text-align: center;
+                letter-spacing: 5px;
+            ">
+                {otp_code}
+            </div>
+
+            <p>If you didn't request this, ignore this email.</p>
+        </div>
+        """
+
+        message = MessageSchema(
+            subject="ROULIN POST - Verify Your Account",
+            recipients=[user.email],
+            body=email_html,
+            subtype=MessageType.html
+        )
+
+        # DO NOT CRASH IF EMAIL FAILS
+        try:
+            fm = FastMail(mail_config)
+            await fm.send_message(message)
+            print("EMAIL SENT SUCCESSFULLY")
+
+        except Exception as email_error:
+            print("EMAIL ERROR:")
+            print(str(email_error))
+
+        return {
+            "message": "Registration successful. OTP process started."
+        }
+
+    except HTTPException:
+        raise
+
     except Exception as e:
+        print("REGISTER ERROR:", str(e))
+
         raise HTTPException(
-            status_code=500, 
-            detail=f"Mailing server rejected dispatch transmission. Verify credentials. Error: {str(e)}"
+            status_code=500,
+            detail=str(e)
         )
 
     # Save to staging unverified area only if email sent out successfully
