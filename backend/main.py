@@ -184,24 +184,26 @@ async def register(user: UserRegister):
         """
 
         try:
-            r = resend.Emails.send({
+            response = resend.Emails.send({
                 "from": "onboarding@resend.dev",
                 "to": user.email,
                 "subject": "ROULIN POST - Verify Your Account",
-                "html": email_html
+                "html": email_html,
             })
 
-            print("EMAIL SENT SUCCESSFULLY")
-            print(r)
+            print("========== RESEND SUCCESS ==========")
+            print(response)
+            print("====================================")
 
         except Exception as email_error:
 
-            print("EMAIL ERROR:")
+            print("========== RESEND ERROR ==========")
             print(str(email_error))
+            print("==================================")
 
             raise HTTPException(
                 status_code=500,
-                detail="Failed to send OTP email."
+                detail=f"Failed To Send OTP Email: {str(email_error)}"
             )
 
         return {
