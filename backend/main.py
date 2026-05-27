@@ -177,9 +177,9 @@ async def register(user: UserRegister):
         """
 
         try:
-            # INTEGRATED RESEND IMPLEMENTATION
+            # FIXED: Changed subdomain from 'mail' to 'send' to match your verified Resend config
             response = resend.Emails.send({
-                "from": "no-reply@mail.roulinpost.com",  # Replace with your verified custom domain address
+                "from": "no-reply@send.roulinpost.com",
                 "to": user.email,
                 "subject": "ROULIN POST - Verify Your Account",
                 "html": email_html,
