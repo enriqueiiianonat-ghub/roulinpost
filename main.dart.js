@@ -86784,7 +86784,7 @@ return A.M($async$Av,r)}}
 A.ab7.prototype={}
 A.LW.prototype={
 J(a){var s=null
-return new A.zH(B.Fi,"ROULIN POST - Social Feed",A.uR(s,A.azw(B.ac,s,s,B.bA),B.bA,!0),!1,s)}}
+return new A.zH(B.Fi,"ROULIN POST",A.uR(s,A.azw(B.ac,s,s,B.bA),B.bA,!0),!1,s)}}
 A.yA.prototype={
 ao(){return new A.E6([],A.NT(null,null))}}
 A.E6.prototype={
