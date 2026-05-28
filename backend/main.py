@@ -183,7 +183,7 @@ async def register(user: UserRegister):
                 "to": user.email,
                 "subject": "ROULIN POST - Verify Your Account",
                 "html": email_html,
-            })
+                })
 
             print("========== RESEND SUCCESS ==========")
             print(response)
@@ -416,8 +416,12 @@ async def create_post(
     message: Optional[str] = Form(None),
     files: List[UploadFile] = File([])
 ):
-    if len(files) > 5:
-        raise HTTPException(status_code=400, detail="Cannot upload more than 5 images per post.")
+    # -------------------------------------------------------------
+    # 📝 NOTE: CHANGED SECTION (FastAPI Request Limit raised from 5 to 12)
+    # -------------------------------------------------------------
+    if len(files) > 12:
+        raise HTTPException(status_code=400, detail="Cannot upload more than 12 images per post.")
+    # -------------------------------------------------------------
 
     image_urls = []
     for file in files:
@@ -426,7 +430,7 @@ async def create_post(
         if url:
             image_urls.append(url)
             
-    post_ref = db_fs.collection('posts').document()
+        post_ref = db_fs.collection('posts').document()
     post_ref.set({
         'username': username,
         'message': message or "",
@@ -459,8 +463,12 @@ async def update_post(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid retained images list format")
 
-    if len(retained_urls) + len(files) > 5:
-        raise HTTPException(status_code=400, detail="Total post images cannot exceed 5.")
+    # -------------------------------------------------------------
+    # 📝 NOTE: CHANGED SECTION (FastAPI Update Limit raised from 5 to 12)
+    # -------------------------------------------------------------
+    if len(retained_urls) + len(files) > 12:
+        raise HTTPException(status_code=400, detail="Total post images cannot exceed 12.")
+    # -------------------------------------------------------------
 
     bucket = storage.bucket()
     for old_url in old_post.get("image_urls", []):
