@@ -87114,7 +87114,7 @@ og(a,b){return this.amJ(a,b)},
 amJ(a8,a9){var s=0,r=A.N(t.H),q,p=2,o=[],n=[],m=this,l,k,j,i,h,g,f,e,d,c,b,a,a0,a1,a2,a3,a4,a5,a6,a7
 var $async$og=A.J(function(b0,b1){if(b0===1){o.push(b1)
 s=p}for(;;)switch(s){case 0:a6=J.b4(a9)
-if(a6.gE(a9)>5){s=1
+if(a6.gE(a9)>12){s=1
 break}m.ag(new A.alD(m))
 p=4
 l=A.awF("POST",A.dH("https://roulinpost-3.onrender.com/posts"))
@@ -87388,7 +87388,7 @@ q=t.p
 p=A.c([],q)
 o=j.c
 if(o.length!==0)p.push(new A.bP(B.n7,A.dq(o,k,k,k,A.fV(k,k,j.d?B.eM:B.cS,k,k,k,k,k,k,k,k,13,k,k,B.bm,k,k,!0,k,k,k,k,k,k,k,k),k,k),k))
-if(j.b)B.b.S(p,A.c([B.Vt,B.yV,A.nm(l.c,B.GE,B.QV,1,!1)],q))
+if(j.b)B.b.S(p,A.c([B.Vu,B.yV,A.nm(l.c,B.GE,B.QV,1,!1)],q))
 else{o=A.c([A.nm(l.d,B.GF,k,1,!1)],q)
 if(!j.a)o.push(A.nm(l.e,B.GD,B.lo,1,!1))
 o.push(A.nm(l.f,B.GA,k,1,!0))
@@ -87751,12 +87751,12 @@ return A.G(n.m2(new A.M0(o,null)),$async$$0)
 case 2:m=b
 if(m!=null){n=q.c
 p=q.a
-if(J.bX(m)>10)n.$1(new A.am8(p))
+if(J.bX(m)>12)n.$1(new A.am8(p))
 else n.$1(new A.am9(p,m))}return A.L(null,r)}})
 return A.M($async$$0,r)},
 $S:10}
 A.am8.prototype={
-$0(){this.a.b="\u26a0\ufe0f Selection Denied: You can select a maximum of 10 images only."},
+$0(){this.a.b="\u26a0\ufe0f Selection Denied: You can select a maximum of 12 images only."},
 $S:0}
 A.am9.prototype={
 $0(){var s=this.a
@@ -87769,7 +87769,7 @@ return null},
 $S:0}
 A.amc.prototype={
 $0(){var s=this,r=s.a
-if(J.bX(r.a)>5)return
+if(J.bX(r.a)>12)return
 s.b.og(s.c.a.a,r.a)
 A.ec(s.d,!1).hp(null)},
 $S:0}
@@ -87781,7 +87781,7 @@ A.amn.prototype={
 $2(a,b){var s,r,q,p=this,o=null,n=t.p,m=A.c([],n),l=p.b
 m.push(A.nm(l,B.GB,o,3,!1))
 m.push(B.i3)
-m.push(B.Vu)
+m.push(B.Vt)
 m.push(B.yX)
 s=p.c
 if(s.length===0&&p.d.length===0)m.push(B.Vn)
@@ -87822,7 +87822,7 @@ $0(){var s=0,r=A.N(t.H),q,p=this,o,n
 var $async$$0=A.J(function(a,b){if(a===1)return A.K(b,r)
 for(;;)switch(s){case 0:o=p.b
 n=p.c
-if(o.length+n.length>5){s=1
+if(o.length+n.length>12){s=1
 break}s=3
 return A.G(p.a.rQ(p.d.h(0,"id"),p.e.a.a,o,n),$async$$0)
 case 3:A.ec(p.f,!1).hp(null)
@@ -95918,10 +95918,10 @@ B.f7=new A.cC("Cancel",null,null,null,null,null,null,null,null)
 B.Vq=new A.cC("Delete Post",null,null,null,null,null,null,null,null)
 B.Vr=new A.cC("Confirm Account Destruction",null,null,null,null,null,null,null,null)
 B.Vs=new A.cC("POST",null,null,null,null,null,null,null,null)
-B.Ti=new A.l(!0,B.I,null,null,null,null,13,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
-B.Vt=new A.cC("Enter the 6-digit verification code sent to your email to activate your account.",null,B.Ti,null,null,null,null,null,null)
 B.RZ=new A.l(!0,null,null,null,null,null,13,B.bm,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
-B.Vu=new A.cC("Current Images (Max 5 total):",null,B.RZ,null,null,null,null,null,null)
+B.Vt=new A.cC("Current Images (Max 12 total):",null,B.RZ,null,null,null,null,null,null)
+B.Ti=new A.l(!0,B.I,null,null,null,null,13,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
+B.Vu=new A.cC("Enter the 6-digit verification code sent to your email to activate your account.",null,B.Ti,null,null,null,null,null,null)
 B.Vv=new A.cC("DELETE PERMANENTLY",null,null,null,null,null,null,null,null)
 B.Sk=new A.l(!0,B.bq,null,null,null,null,12,B.X,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null)
 B.Vw=new A.cC("Newly Appended Photos:",null,B.Sk,null,null,null,null,null,null)
