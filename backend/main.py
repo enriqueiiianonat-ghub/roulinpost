@@ -60,7 +60,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
         c_type = (file.content_type or "").lower()
         f_name = (file.filename or "").lower()
         
-        # Read file bytes immediately to avoid stream timeouts
         await file.seek(0)
         file_bytes = await file.read()
         
@@ -68,9 +67,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
             print("⚠️ Upload Blocked: File byte array empty.")
             return ""
 
-        # Check file signature bytes directly
         is_mp4_signature = len(file_bytes) > 12 and b"ftyp" in file_bytes[4:12]
-        
         is_video = (
             c_type.startswith("video/") or 
             "video" in c_type or
@@ -83,14 +80,12 @@ async def process_and_upload_media(file: UploadFile) -> str:
             temp_input_path = UPLOAD_DIR / f"raw_{unique_id}.mp4"
             temp_output_path = UPLOAD_DIR / f"compressed_{unique_id}.mp4"
             
-            # Write bytes to temporary server disk file
             with open(temp_input_path, "wb") as buffer:
                 buffer.write(file_bytes)
                 
             upload_source = temp_input_path
             use_fallback = True
 
-            # Attempt FFmpeg compression
             try:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
@@ -104,9 +99,8 @@ async def process_and_upload_media(file: UploadFile) -> str:
                             crf=28,             
                             pix_fmt='yuv420p',  
                             acodec='aac',
-                            f='mp4', # FORCED: Ensures uniform output container rules
+                            f='mp4', 
                             video_bitrate='800k',
-                            # FIXED: Prevents "width or height not divisible by 2" micro-crashes
                             vf='scale="trunc(iw/2)*2:trunc(ih/2)*2"'   
                         )
                         .overwrite_output()
@@ -117,14 +111,13 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     upload_source = temp_output_path
                     use_fallback = False
             except Exception as ffmpeg_err:
-                # If local system environment lacks native FFmpeg binaries, use safe fallback upload
-                print(f"⚠️ FFmpeg compression failed or missing environment binaries. Uploading raw video: {ffmpeg_err}")
+                print(f"⚠️ FFmpeg compression failed. Uploading raw video: {ffmpeg_err}")
                 upload_source = temp_input_path
 
-            # Save to Cloud Storage
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             
+            # FIXED: Always explicitly enforce "video/mp4" content type so browsers don't treat it as a raw stream dump
             if use_fallback:
                 blob.upload_from_string(file_bytes, content_type="video/mp4")
             else:
@@ -132,7 +125,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 
             blob.make_public()
             
-            # Clean local files
             try:
                 if temp_input_path and temp_input_path.exists():
                     os.remove(temp_input_path)
@@ -144,7 +136,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
             return blob.public_url
 
         else:
-            # Safe Image processing fallback block
             try:
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
@@ -164,7 +155,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             except Exception as img_err:
-                print(f"⚠️ Image parsing failed, uploading raw data direct: {img_err}")
+                print(f"⚠️ Image parsing failed: {img_err}")
                 unique_id = uuid.uuid4()
                 blob_path = f"posts/{unique_id}.mp4" if is_mp4_signature else f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
