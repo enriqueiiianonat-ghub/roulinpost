@@ -30,14 +30,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- FIREBASE SECURE MEMORY INITIALIZATION BLOCK ---
 CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-c33dc12e77.json"
 BUCKET_NAME = "meshmeedb.firebasestorage.app"
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate(CERT_PATH)
-    firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
+    firebase_json_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    
+    if firebase_json_env:
+        try:
+            cred_dict = py_json.loads(firebase_json_env)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
+            print("🚀 Firebase successfully initialized via Render Environment Variable.")
+        except Exception as json_err:
+            print(f"🔥 Error parsing Environment Variable JSON: {json_err}")
+            raise json_err
+    else:
+        if os.path.exists(CERT_PATH):
+            cred = credentials.Certificate(CERT_PATH)
+            firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
+            print(f"🚀 Firebase successfully initialized via local file target: {CERT_PATH}")
+        else:
+            raise RuntimeError(f"❌ Critical Error: Credentials not found via Env or local path: {CERT_PATH}")
 
 db_fs = firestore.client()
+# ---------------------------------------------------
 
 class UserRegister(BaseModel):
     username: str
@@ -111,13 +129,13 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     upload_source = temp_output_path
                     use_fallback = False
             except Exception as ffmpeg_err:
-                print(f"⚠️ FFmpeg compression failed. Uploading raw video: {ffmpeg_err}")
+                print(f"⚠️ FFmpeg compression failed. Uploading raw video safely: {ffmpeg_err}")
                 upload_source = temp_input_path
 
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             
-            # FIXED: Always explicitly enforce "video/mp4" content type so browsers don't treat it as a raw stream dump
+            # ENFORCED MIME RECOVERY: Ensures browsers handle it as streamable video
             if use_fallback:
                 blob.upload_from_string(file_bytes, content_type="video/mp4")
             else:
