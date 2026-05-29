@@ -1,9 +1,12 @@
 # Use a lightweight official Python image
 FROM python:3.10-slim
 
-# Install system dependencies including native FFmpeg
+# FIXED: Added shared-mime-info, libmagic-dev, and curl to help Python parse web byte formats
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    shared-mime-info \
+    libmagic-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set our application working space
