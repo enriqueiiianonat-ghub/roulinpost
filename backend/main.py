@@ -96,14 +96,13 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
-            
-            # FIXED: Explicitly initializing tracking states so Pylance stops complaining
             use_fallback = True
             upload_source = None
 
-            # Always apply clean streaming headers natively 
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
+            
+            # 🔥 FIX: Force Firebase to attach native stream playback descriptors
             blob.metadata = {
                 "contentType": "video/mp4",
                 "contentDisposition": "inline"
