@@ -72,8 +72,6 @@ class UserLogin(BaseModel):
     password: str
 
 async def process_and_upload_media(file: UploadFile) -> str:
-    temp_input_path = None
-    temp_output_path = None
     try:
         bucket = storage.bucket()
         c_type = (file.content_type or "").lower()
@@ -96,74 +94,20 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
-            temp_input_path = UPLOAD_DIR / f"raw_{unique_id}.mp4"
-            temp_output_path = UPLOAD_DIR / f"compressed_{unique_id}.mp4"
-            
-            with open(temp_input_path, "wb") as buffer:
-                buffer.write(file_bytes)
-                
-            upload_source = temp_input_path
-            use_fallback = True
-
-            try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, 
-                    lambda: (
-                        ffmpeg
-                        .input(str(temp_input_path))
-                        .output(
-                            str(temp_output_path),
-                            vcodec='libx264',
-                            crf=28,             
-                            pix_fmt='yuv420p',  
-                            acodec='aac',
-                            f='mp4', 
-                            video_bitrate='800k',
-                            vf='scale="trunc(iw/2)*2:trunc(ih/2)*2"'   
-                        )
-                        .overwrite_output()
-                        .run(quiet=True, capture_stdout=True, capture_stderr=True)
-                    )
-                )
-                if temp_output_path.exists() and temp_output_path.stat().st_size > 0:
-                    upload_source = temp_output_path
-                    use_fallback = False
-            except Exception as ffmpeg_err:
-                print(f"⚠️ FFmpeg compression failed. Uploading raw video safely: {ffmpeg_err}")
-                upload_source = temp_input_path
-
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             
-            # FIXED: Explicitly dictate Content-Type AND contentDisposition metadata headers
+            # CRITICAL: Force native web headers on upload
             blob.metadata = {
                 "contentType": "video/mp4",
                 "contentDisposition": "inline"
             }
             
-            # ... (Your existing code where it uploads to Firebase storage)
-            if use_fallback:
-                blob.upload_from_string(file_bytes, content_type="video/mp4")
-            else:
-                blob.upload_from_filename(str(upload_source), content_type="video/mp4")
-                
+            blob.upload_from_string(file_bytes, content_type="video/mp4")
             blob.make_public()
             
-            try:
-                if temp_input_path and temp_input_path.exists():
-                    os.remove(temp_input_path)
-                if temp_output_path and temp_output_path.exists():
-                    os.remove(temp_output_path)
-            except:
-                pass
-                
-            # 🔥 FIX: Change this from blob.public_url to the Firebase API format
-            # This bypasses the stream block on modern Flutter Web environments
-            firebase_friendly_url = f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
-            return firebase_friendly_url
-                
-            return blob.public_url
+            # Always return the direct media token endpoint structure
+            return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
 
         else:
             try:
@@ -181,27 +125,21 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
-                blob.metadata = {"contentType": "image/jpeg"} # FIXED: Consistency for Images
+                blob.metadata = {"contentType": "image/jpeg"}
                 blob.upload_from_string(compressed_data, content_type="image/jpeg")
                 blob.make_public()
                 return blob.public_url
             except Exception as img_err:
                 print(f"⚠️ Image parsing failed: {img_err}")
                 unique_id = uuid.uuid4()
-                is_fallback_vid = is_mp4_signature
-                blob_path = f"videos/{unique_id}.mp4" if is_fallback_vid else f"posts/{uuid.uuid4()}.jpg"
+                blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
-                
-                # FIXED: Structural metadata safety injection inside fallback exception handlers
-                fallback_type = "video/mp4" if is_fallback_vid else (c_type or "image/jpeg")
-                blob.metadata = {"contentType": fallback_type, "contentDisposition": "inline" if is_fallback_vid else "attachment"}
-                
-                blob.upload_from_string(file_bytes, content_type=fallback_type)
+                blob.metadata = {"contentType": "image/jpeg"}
+                blob.upload_from_string(file_bytes, content_type="image/jpeg")
                 blob.make_public()
                 return blob.public_url
             
     except Exception as e:
-        # Cleanup code remains identical...
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
 
