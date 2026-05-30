@@ -11,7 +11,7 @@ import random
 import resend
 import asyncio 
 import json as py_json
-import ffmpeg  
+import subprocess
 from pathlib import Path
 from PIL import Image, ImageOps
 
@@ -19,7 +19,7 @@ resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
 
-# Change this near the top of your main.py:
+# Temporary working directory for video conversion tasks
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -96,25 +96,39 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
-            use_fallback = True
-            upload_source = None
+            
+            # Form distinct paths inside /tmp/uploads for processing
+            temp_input_path = UPLOAD_DIR / f"{unique_id}_input{Path(f_name).suffix or '.mp4'}"
+            temp_output_path = UPLOAD_DIR / f"{unique_id}_converted.mp4"
 
+            # Write memory stream buffer to disk for ffmpeg visibility
+            with open(temp_input_path, "wb") as f:
+                f.write(file_bytes)
+
+            # Transcode to modern web standards (H.264 AVC + AAC Audio)
+            print(f"🎬 Transcoding video {f_name} via FFmpeg...")
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", str(temp_input_path),
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                str(temp_output_path)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Destination path inside Firebase Storage
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
-            
-            # 🔥 FIX: Force Firebase to attach native stream playback descriptors
-            blob.metadata = {
-                "contentType": "video/mp4",
-                "contentDisposition": "inline"
-            }
-            
-            if use_fallback:
-                blob.upload_from_string(file_bytes, content_type="video/mp4")
-            else:
-                blob.upload_from_filename(str(upload_source), content_type="video/mp4")
-                
+
+            # Upload converted file asset from storage destination
+            blob.upload_from_filename(
+                str(temp_output_path),
+                content_type="video/mp4"
+            )
+
             blob.make_public()
-            return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
+            return blob.public_url
 
         else:
             try:
@@ -138,7 +152,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 return blob.public_url
             except Exception as img_err:
                 print(f"⚠️ Image parsing failed: {img_err}")
-                unique_id = uuid.uuid4()
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": "image/jpeg"}
@@ -149,6 +162,15 @@ async def process_and_upload_media(file: UploadFile) -> str:
     except Exception as e:
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
+        
+    finally:
+        # Guarantee removal of local transient temp file tracks
+        if temp_input_path and os.path.exists(temp_input_path):
+            try: os.remove(temp_input_path)
+            except: pass
+        if temp_output_path and os.path.exists(temp_output_path):
+            try: os.remove(temp_output_path)
+            except: pass
 
 def process_and_upload_avatar(file_bytes: bytes) -> str:
     try:
