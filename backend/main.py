@@ -11,8 +11,7 @@ import random
 import resend
 import asyncio 
 import json as py_json
-import tempfile
-import subprocess
+import ffmpeg  
 from pathlib import Path
 from PIL import Image, ImageOps
 
@@ -20,7 +19,7 @@ resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
 
-# Temporary working directory for media tasks
+# Change this near the top of your main.py:
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -73,6 +72,8 @@ class UserLogin(BaseModel):
     password: str
 
 async def process_and_upload_media(file: UploadFile) -> str:
+    temp_input_path = None
+    temp_output_path = None
     try:
         bucket = storage.bucket()
         c_type = (file.content_type or "").lower()
@@ -95,76 +96,25 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
+            use_fallback = True
+            upload_source = None
 
-            # Save original upload
-            temp_input = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=os.path.splitext(f_name)[1] or ".tmp"
-            )
-            temp_input.write(file_bytes)
-            temp_input.close()
-
-            temp_output = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".mp4"
-            )
-            temp_output.close()
-
-            try:
-                # Convert EVERYTHING to browser-safe MP4
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i", temp_input.name,
-
-                        # Video codec
-                        "-c:v", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-
-                        # Audio codec
-                        "-c:a", "aac",
-                        "-b:a", "128k",
-
-                        # Web streaming optimization
-                        "-movflags", "+faststart",
-
-                        # Compatibility
-                        "-pix_fmt", "yuv420p",
-
-                        temp_output.name,
-                    ],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-
-                blob_path = f"videos/{unique_id}.mp4"
-                blob = bucket.blob(blob_path)
-
-                blob.upload_from_filename(
-                    temp_output.name,
-                    content_type="video/mp4"
-                )
-
-                blob.content_type = "video/mp4"
-                blob.patch()
-
-                blob.make_public()
-
-                return blob.public_url
-
-            finally:
-                try:
-                    os.remove(temp_input.name)
-                except:
-                    pass
-
-                try:
-                    os.remove(temp_output.name)
-                except:
-                    pass
+            blob_path = f"videos/{unique_id}.mp4"
+            blob = bucket.blob(blob_path)
+            
+            # 🔥 FIX: Force Firebase to attach native stream playback descriptors
+            blob.metadata = {
+                "contentType": "video/mp4",
+                "contentDisposition": "inline"
+            }
+            
+            if use_fallback:
+                blob.upload_from_string(file_bytes, content_type="video/mp4")
+            else:
+                blob.upload_from_filename(str(upload_source), content_type="video/mp4")
+                
+            blob.make_public()
+            return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
 
         else:
             try:
@@ -188,6 +138,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 return blob.public_url
             except Exception as img_err:
                 print(f"⚠️ Image parsing failed: {img_err}")
+                unique_id = uuid.uuid4()
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": "image/jpeg"}
@@ -195,15 +146,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             
-    except subprocess.CalledProcessError as e:
-        print("========== FFMPEG ERROR ==========")
-        print(e.stderr.decode(errors="ignore"))
-        print("==================================")
-        raise HTTPException(
-            status_code=500,
-            detail="Video conversion failed."
-        )
-
     except Exception as e:
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
