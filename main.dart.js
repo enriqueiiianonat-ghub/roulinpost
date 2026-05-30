@@ -26061,6 +26061,7 @@ this.a=b},
 Sk:function Sk(){var _=this
 _.d=$
 _.f=_.e=!1
+_.r=$
 _.c=_.a=null},
 an0:function an0(a){this.a=a},
 an1:function an1(a){this.a=a},
@@ -88036,11 +88037,14 @@ $S:0}
 A.to.prototype={
 an(){return new A.Sk()}}
 A.Sk.prototype={
-aB(){this.aR()
-this.adH()},
+aB(){var s=this
+s.aR()
+s.r="video-view-"+1000*Date.now()+"-"+B.c.gA(s.a.c)
+s.adH()},
 adH(){var s,r=this
 $.azg()
-s=r.a.c
+s=r.r
+s===$&&A.a()
 $.ob().BW(s,new A.an0(r),!0)
 s=new A.D6(A.du(r.a.c).k(0),new A.ai2(!1,!0),B.Xq,$.ao())
 r.d=s
@@ -88049,10 +88053,12 @@ l(){var s=this.d
 s===$&&A.a()
 s.l()
 this.aI()},
-J(a){var s=null
-if(this.f)return A.f9(s,B.C3,B.u,B.eb,s,s,s,s,s,s,s,s,s)
-if(!this.e)return A.f9(s,B.C6,B.u,B.l,s,s,s,s,s,s,s,s,s)
-return A.aBd(s,B.xZ,this.a.c)}}
+J(a){var s,r=null
+if(this.f)return A.f9(r,B.C3,B.u,B.eb,r,r,r,r,r,r,r,r,r)
+if(!this.e)return A.f9(r,B.C6,B.u,B.l,r,r,r,r,r,r,r,r,r)
+s=this.r
+s===$&&A.a()
+return A.aBd(r,B.xZ,s)}}
 A.an0.prototype={
 $1(a){var s=v.G.document.createElement("video")
 s.src=this.a.a.c
