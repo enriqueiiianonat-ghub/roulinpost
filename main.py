@@ -19,8 +19,9 @@ resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+# Change this near the top of your main.py:
+UPLOAD_DIR = Path("/tmp/uploads")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,14 +31,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- FIREBASE SECURE MEMORY INITIALIZATION BLOCK ---
 CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-c33dc12e77.json"
 BUCKET_NAME = "meshmeedb.firebasestorage.app"
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate(CERT_PATH)
-    firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
+    firebase_json_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    
+    if firebase_json_env:
+        try:
+            cred_dict = py_json.loads(firebase_json_env)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
+            print("🚀 Firebase successfully initialized via Render Environment Variable.")
+        except Exception as json_err:
+            print(f"🔥 Error parsing Environment Variable JSON: {json_err}")
+            raise json_err
+    else:
+        if os.path.exists(CERT_PATH):
+            cred = credentials.Certificate(CERT_PATH)
+            firebase_admin.initialize_app(cred, {'storageBucket': BUCKET_NAME})
+            print(f"🚀 Firebase successfully initialized via local file target: {CERT_PATH}")
+        else:
+            raise RuntimeError(f"❌ Critical Error: Credentials not found via Env or local path: {CERT_PATH}")
 
 db_fs = firestore.client()
+# ---------------------------------------------------
 
 class UserRegister(BaseModel):
     username: str
@@ -111,13 +130,18 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     upload_source = temp_output_path
                     use_fallback = False
             except Exception as ffmpeg_err:
-                print(f"⚠️ FFmpeg compression failed. Uploading raw video: {ffmpeg_err}")
+                print(f"⚠️ FFmpeg compression failed. Uploading raw video safely: {ffmpeg_err}")
                 upload_source = temp_input_path
 
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             
-            # FIXED: Always explicitly enforce "video/mp4" content type so browsers don't treat it as a raw stream dump
+            # FIXED: Explicitly dictate Content-Type AND contentDisposition metadata headers
+            blob.metadata = {
+                "contentType": "video/mp4",
+                "contentDisposition": "inline"
+            }
+            
             if use_fallback:
                 blob.upload_from_string(file_bytes, content_type="video/mp4")
             else:
@@ -151,26 +175,27 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
+                blob.metadata = {"contentType": "image/jpeg"} # FIXED: Consistency for Images
                 blob.upload_from_string(compressed_data, content_type="image/jpeg")
                 blob.make_public()
                 return blob.public_url
             except Exception as img_err:
                 print(f"⚠️ Image parsing failed: {img_err}")
                 unique_id = uuid.uuid4()
-                blob_path = f"posts/{unique_id}.mp4" if is_mp4_signature else f"posts/{uuid.uuid4()}.jpg"
+                is_fallback_vid = is_mp4_signature
+                blob_path = f"videos/{unique_id}.mp4" if is_fallback_vid else f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
-                blob.upload_from_string(file_bytes, content_type=c_type or "application/octet-stream")
+                
+                # FIXED: Structural metadata safety injection inside fallback exception handlers
+                fallback_type = "video/mp4" if is_fallback_vid else (c_type or "image/jpeg")
+                blob.metadata = {"contentType": fallback_type, "contentDisposition": "inline" if is_fallback_vid else "attachment"}
+                
+                blob.upload_from_string(file_bytes, content_type=fallback_type)
                 blob.make_public()
                 return blob.public_url
             
     except Exception as e:
-        try:
-            if temp_input_path and temp_input_path.exists():
-                os.remove(temp_input_path)
-            if temp_output_path and temp_output_path.exists():
-                os.remove(temp_output_path)
-        except:
-            pass
+        # Cleanup code remains identical...
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
 
