@@ -72,6 +72,8 @@ class UserLogin(BaseModel):
     password: str
 
 async def process_and_upload_media(file: UploadFile) -> str:
+    temp_input_path = None
+    temp_output_path = None
     try:
         bucket = storage.bucket()
         c_type = (file.content_type or "").lower()
@@ -94,19 +96,25 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
+            
+            # FIXED: Explicitly initializing tracking states so Pylance stops complaining
+            use_fallback = True
+            upload_source = None
+
+            # Always apply clean streaming headers natively 
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
-            
-            # CRITICAL: Force native web headers on upload
             blob.metadata = {
                 "contentType": "video/mp4",
                 "contentDisposition": "inline"
             }
             
-            blob.upload_from_string(file_bytes, content_type="video/mp4")
+            if use_fallback:
+                blob.upload_from_string(file_bytes, content_type="video/mp4")
+            else:
+                blob.upload_from_filename(str(upload_source), content_type="video/mp4")
+                
             blob.make_public()
-            
-            # Always return the direct media token endpoint structure
             return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
 
         else:
