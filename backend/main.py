@@ -142,6 +142,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 "contentDisposition": "inline"
             }
             
+            # ... (Your existing code where it uploads to Firebase storage)
             if use_fallback:
                 blob.upload_from_string(file_bytes, content_type="video/mp4")
             else:
@@ -156,6 +157,11 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     os.remove(temp_output_path)
             except:
                 pass
+                
+            # 🔥 FIX: Change this from blob.public_url to the Firebase API format
+            # This bypasses the stream block on modern Flutter Web environments
+            firebase_friendly_url = f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
+            return firebase_friendly_url
                 
             return blob.public_url
 
