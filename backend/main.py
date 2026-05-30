@@ -11,6 +11,7 @@ import random
 import resend
 import asyncio 
 import json as py_json
+import tempfile
 import subprocess
 from pathlib import Path
 from PIL import Image, ImageOps
@@ -19,7 +20,7 @@ resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
 
-# Temporary working directory for video conversion tasks
+# Temporary working directory for media tasks
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -72,8 +73,6 @@ class UserLogin(BaseModel):
     password: str
 
 async def process_and_upload_media(file: UploadFile) -> str:
-    temp_input_path = None
-    temp_output_path = None
     try:
         bucket = storage.bucket()
         c_type = (file.content_type or "").lower()
@@ -96,39 +95,76 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
-            
-            # Form distinct paths inside /tmp/uploads for processing
-            temp_input_path = UPLOAD_DIR / f"{unique_id}_input{Path(f_name).suffix or '.mp4'}"
-            temp_output_path = UPLOAD_DIR / f"{unique_id}_converted.mp4"
 
-            # Write memory stream buffer to disk for ffmpeg visibility
-            with open(temp_input_path, "wb") as f:
-                f.write(file_bytes)
-
-            # Transcode to modern web standards (H.264 AVC + AAC Audio)
-            print(f"🎬 Transcoding video {f_name} via FFmpeg...")
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", str(temp_input_path),
-                "-c:v", "libx264",
-                "-c:a", "aac",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                str(temp_output_path)
-            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Destination path inside Firebase Storage
-            blob_path = f"videos/{unique_id}.mp4"
-            blob = bucket.blob(blob_path)
-
-            # Upload converted file asset from storage destination
-            blob.upload_from_filename(
-                str(temp_output_path),
-                content_type="video/mp4"
+            # Save original upload
+            temp_input = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=os.path.splitext(f_name)[1] or ".tmp"
             )
+            temp_input.write(file_bytes)
+            temp_input.close()
 
-            blob.make_public()
-            return blob.public_url
+            temp_output = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".mp4"
+            )
+            temp_output.close()
+
+            try:
+                # Convert EVERYTHING to browser-safe MP4
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i", temp_input.name,
+
+                        # Video codec
+                        "-c:v", "libx264",
+                        "-preset", "fast",
+                        "-crf", "23",
+
+                        # Audio codec
+                        "-c:a", "aac",
+                        "-b:a", "128k",
+
+                        # Web streaming optimization
+                        "-movflags", "+faststart",
+
+                        # Compatibility
+                        "-pix_fmt", "yuv420p",
+
+                        temp_output.name,
+                    ],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+                blob_path = f"videos/{unique_id}.mp4"
+                blob = bucket.blob(blob_path)
+
+                blob.upload_from_filename(
+                    temp_output.name,
+                    content_type="video/mp4"
+                )
+
+                blob.content_type = "video/mp4"
+                blob.patch()
+
+                blob.make_public()
+
+                return blob.public_url
+
+            finally:
+                try:
+                    os.remove(temp_input.name)
+                except:
+                    pass
+
+                try:
+                    os.remove(temp_output.name)
+                except:
+                    pass
 
         else:
             try:
@@ -159,18 +195,18 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             
+    except subprocess.CalledProcessError as e:
+        print("========== FFMPEG ERROR ==========")
+        print(e.stderr.decode(errors="ignore"))
+        print("==================================")
+        raise HTTPException(
+            status_code=500,
+            detail="Video conversion failed."
+        )
+
     except Exception as e:
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
-        
-    finally:
-        # Guarantee removal of local transient temp file tracks
-        if temp_input_path and os.path.exists(temp_input_path):
-            try: os.remove(temp_input_path)
-            except: pass
-        if temp_output_path and os.path.exists(temp_output_path):
-            try: os.remove(temp_output_path)
-            except: pass
 
 def process_and_upload_avatar(file_bytes: bytes) -> str:
     try:
