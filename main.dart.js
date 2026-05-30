@@ -87366,7 +87366,7 @@ case 5:return A.J(null,r)
 case 1:return A.I(p.at(-1),r)}})
 return A.K($async$A5,r)},
 y3(a){var s=a.toLowerCase()
-return B.c.v(s,"/videos/")||B.c.v(s,"/videos%2f")||B.c.eK(s,".mp4")||B.c.eK(s,".mov")||B.c.eK(s,".avi")||B.c.v(s,".mp4?")||B.c.v(s,"/videos")},
+return B.c.v(s,"/videos/")||B.c.v(s,"/videos%2f")||B.c.v(s,"videos%2f")||B.c.eK(s,".mp4")||B.c.eK(s,".mov")||B.c.eK(s,".avi")||B.c.v(s,".mp4?")},
 asw(a,b){var s=A.aCq(b),r=this.c
 r.toString
 A.wI(!0,new A.amc(this,s,a,b),r,t.z)},
