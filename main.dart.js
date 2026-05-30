@@ -88068,6 +88068,7 @@ s.loop=!0
 s.playsInline=!0
 s.setAttribute("crossorigin","anonymous")
 s.setAttribute("controlslist","nodownload")
+s.setAttribute("type","video/mp4")
 s.style.border="none"
 s.style.width="100%"
 s.style.height="100%"
