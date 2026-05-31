@@ -15,6 +15,10 @@ import ffmpeg
 from pathlib import Path
 from PIL import Image, ImageOps
 
+# Required updates for FFmpeg processing pipelines
+import tempfile
+import subprocess
+
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
@@ -96,25 +100,89 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
-            use_fallback = True
-            upload_source = None
 
-            blob_path = f"videos/{unique_id}.mp4"
-            blob = bucket.blob(blob_path)
-            
-            # 🔥 FIX: Force Firebase to attach native stream playback descriptors
-            blob.metadata = {
-                "contentType": "video/mp4",
-                "contentDisposition": "inline"
-            }
-            
-            if use_fallback:
-                blob.upload_from_string(file_bytes, content_type="video/mp4")
-            else:
-                blob.upload_from_filename(str(upload_source), content_type="video/mp4")
-                
-            blob.make_public()
-            return f"https://firebasestorage.googleapis.com/v0/b/{bucket.name}/o/videos%2F{unique_id}.mp4?alt=media"
+            # Save original upload
+            temp_input = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=os.path.splitext(f_name)[1] or ".tmp"
+            )
+            temp_input.write(file_bytes)
+            temp_input.close()
+
+            temp_output = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".mp4"
+            )
+            temp_output.close()
+
+            # 🔥 INCORPORATED PIPELINE EXCEPTION HANDLER OVER THE SUBPROCESS MODULE
+            use_fallback_upload = False
+            try:
+                # Convert EVERYTHING to browser-safe MP4 via native FFmpeg core binary
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i", temp_input.name,
+
+                        # Video codec
+                        "-c:v", "libx264",
+                        "-preset", "fast",
+                        "-crf", "23",
+
+                        # Audio codec
+                        "-c:a", "aac",
+                        "-b:a", "128k",
+
+                        # Web streaming optimization
+                        "-movflags", "+faststart",
+
+                        # Compatibility
+                        "-pix_fmt", "yuv420p",
+
+                        temp_output.name,
+                    ],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except (FileNotFoundError, Exception) as e:
+                print(f"⚠️ Local frame extractor skipped or ffmpeg/ffprobe binary not found in PATH environment: {e}")
+                # Toggle recovery flag to switch from an empty string directly into the fallback data upload
+                use_fallback_upload = True
+
+            try:
+                blob_path = f"videos/{unique_id}.mp4"
+                blob = bucket.blob(blob_path)
+
+                if use_fallback_upload:
+                    # If ffmpeg is missing on system, upload source video file directly to bypass blocking
+                    blob.upload_from_filename(
+                        temp_input.name,
+                        content_type="video/mp4"
+                    )
+                else:
+                    blob.upload_from_filename(
+                        temp_output.name,
+                        content_type="video/mp4"
+                    )
+
+                blob.content_type = "video/mp4"
+                blob.patch()
+                blob.make_public()
+
+                return blob.public_url
+
+            finally:
+                try:
+                    os.remove(temp_input.name)
+                except:
+                    pass
+
+                try:
+                    os.remove(temp_output.name)
+                except:
+                    pass
 
         else:
             try:
@@ -146,6 +214,15 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             
+    except subprocess.CalledProcessError as e:
+        print("========== FFMPEG ERROR ==========")
+        print(e.stderr.decode(errors="ignore"))
+        print("==================================")
+        raise HTTPException(
+            status_code=500,
+            detail="Video conversion failed."
+        )
+
     except Exception as e:
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
@@ -252,9 +329,9 @@ async def update_profile(
     new_password: Optional[str] = Form(None),
     avatar_file: Optional[UploadFile] = File(None)
 ):
-    clean_current = current_username.strip().lower()
+    padding_current = current_username.strip().lower()
     clean_new = new_username.strip().lower()
-    user_ref = db_fs.collection('users').document(clean_current)
+    user_ref = db_fs.collection('users').document(padding_current)
     snap = user_ref.get()
     if not snap.exists:
         raise HTTPException(status_code=404, detail="User profile not found")
@@ -274,7 +351,7 @@ async def update_profile(
         avatar_bytes = await avatar_file.read()
         user_data['profile_url'] = process_and_upload_avatar(avatar_bytes)
 
-    if clean_new != clean_current:
+    if clean_new != padding_current:
         new_ref = db_fs.collection('users').document(clean_new)
         if new_ref.get().exists:
             raise HTTPException(status_code=400, detail="New username is already taken")
@@ -290,7 +367,7 @@ async def update_profile(
     if new_password:
         user_data['password'] = new_password
     user_ref.set(user_data)
-    return {"username": clean_current, "email": new_email, "profile_url": user_data.get("profile_url", "")}
+    return {"username": padding_current, "email": new_email, "profile_url": user_data.get("profile_url", "")}
 
 @app.delete("/auth/profile/{username}")
 def delete_user_account(username: str):
