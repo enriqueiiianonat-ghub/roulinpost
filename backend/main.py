@@ -14,8 +14,6 @@ import json as py_json
 import ffmpeg  
 from pathlib import Path
 from PIL import Image, ImageOps
-
-# Required updates for FFmpeg processing pipelines
 import tempfile
 import subprocess
 
@@ -34,7 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- FIREBASE SECURE MEMORY INITIALIZATION BLOCK ---
+# --- FIREBASE INITIALIZATION BLOCK ---
 CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-c33dc12e77.json"
 BUCKET_NAME = "meshmeedb.firebasestorage.app"
 
@@ -75,8 +73,6 @@ class UserLogin(BaseModel):
     password: str
 
 async def process_and_upload_media(file: UploadFile) -> str:
-    temp_input_path = None
-    temp_output_path = None
     try:
         bucket = storage.bucket()
         c_type = (file.content_type or "").lower()
@@ -99,80 +95,24 @@ async def process_and_upload_media(file: UploadFile) -> str:
         
         if is_video:
             unique_id = uuid.uuid4()
+            blob_path = f"videos/{unique_id}.mp4"
+            blob = bucket.blob(blob_path)
 
-            temp_input = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=os.path.splitext(f_name)[1] or ".tmp"
+            blob.metadata = {
+                "contentType": "video/mp4",
+                "contentDisposition": "inline"
+            }
+
+            blob.upload_from_string(
+                file_bytes,
+                content_type="video/mp4"
             )
-            temp_input.write(file_bytes)
-            temp_input.close()
 
-            temp_output = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".mp4"
-            )
-            temp_output.close()
+            blob.content_type = "video/mp4"
+            blob.patch()
+            blob.make_public()
 
-            use_fallback_upload = False
-            try:
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i", temp_input.name,
-                        "-c:v", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-                        "-c:a", "aac",
-                        "-b:a", "128k",
-                        "-movflags", "+faststart",
-                        "-pix_fmt", "yuv420p",
-                        temp_output.name,
-                    ],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-            except (FileNotFoundError, Exception) as e:
-                print(f"⚠️ Local frame extractor skipped or ffmpeg binary missing: {e}")
-                use_fallback_upload = True
-
-            try:
-                blob_path = f"videos/{unique_id}.mp4"
-                blob = bucket.blob(blob_path)
-
-                # Set global cross-origin metadata configurations so live browsers can fetch bytes smoothly
-                blob.metadata = {
-                    "contentType": "video/mp4",
-                    "contentDisposition": "inline"
-                }
-
-                if use_fallback_upload:
-                    blob.upload_from_filename(
-                        temp_input.name,
-                        content_type="video/mp4"
-                    )
-                else:
-                    blob.upload_from_filename(
-                        temp_output.name,
-                        content_type="video/mp4"
-                    )
-
-                blob.content_type = "video/mp4"
-                blob.patch()
-                blob.make_public()
-
-                return blob.public_url
-
-            finally:
-                try:
-                    os.remove(temp_input.name)
-                except:
-                    pass
-                try:
-                    os.remove(temp_output.name)
-                except:
-                    pass
+            return blob.public_url
 
         else:
             try:
@@ -203,14 +143,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             
-    except subprocess.CalledProcessError as e:
-        print("========== FFMPEG ERROR ==========")
-        print(e.stderr.decode(errors="ignore"))
-        print("==================================")
-        raise HTTPException(
-            status_code=500,
-            detail="Video conversion failed."
-        )
     except Exception as e:
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
