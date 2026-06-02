@@ -115,10 +115,8 @@ async def process_and_upload_media(file: UploadFile) -> str:
             )
             temp_output.close()
 
-            # 🔥 INCORPORATED PIPELINE EXCEPTION HANDLER OVER THE SUBPROCESS MODULE
-            use_fallback_upload = False
             try:
-                # Convert EVERYTHING to browser-safe MP4 via native FFmpeg core binary
+                # Convert EVERYTHING to browser-safe MP4
                 subprocess.run(
                     [
                         "ffmpeg",
@@ -146,29 +144,18 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
-            except (FileNotFoundError, Exception) as e:
-                print(f"⚠️ Local frame extractor skipped or ffmpeg/ffprobe binary not found in PATH environment: {e}")
-                # Toggle recovery flag to switch from an empty string directly into the fallback data upload
-                use_fallback_upload = True
 
-            try:
                 blob_path = f"videos/{unique_id}.mp4"
                 blob = bucket.blob(blob_path)
 
-                if use_fallback_upload:
-                    # If ffmpeg is missing on system, upload source video file directly to bypass blocking
-                    blob.upload_from_filename(
-                        temp_input.name,
-                        content_type="video/mp4"
-                    )
-                else:
-                    blob.upload_from_filename(
-                        temp_output.name,
-                        content_type="video/mp4"
-                    )
+                blob.upload_from_filename(
+                    temp_output.name,
+                    content_type="video/mp4"
+                )
 
                 blob.content_type = "video/mp4"
                 blob.patch()
+
                 blob.make_public()
 
                 return blob.public_url
@@ -329,9 +316,9 @@ async def update_profile(
     new_password: Optional[str] = Form(None),
     avatar_file: Optional[UploadFile] = File(None)
 ):
-    padding_current = current_username.strip().lower()
+    clean_current = current_username.strip().lower()
     clean_new = new_username.strip().lower()
-    user_ref = db_fs.collection('users').document(padding_current)
+    user_ref = db_fs.collection('users').document(clean_current)
     snap = user_ref.get()
     if not snap.exists:
         raise HTTPException(status_code=404, detail="User profile not found")
@@ -351,7 +338,7 @@ async def update_profile(
         avatar_bytes = await avatar_file.read()
         user_data['profile_url'] = process_and_upload_avatar(avatar_bytes)
 
-    if clean_new != padding_current:
+    if clean_new != clean_current:
         new_ref = db_fs.collection('users').document(clean_new)
         if new_ref.get().exists:
             raise HTTPException(status_code=400, detail="New username is already taken")
@@ -367,7 +354,7 @@ async def update_profile(
     if new_password:
         user_data['password'] = new_password
     user_ref.set(user_data)
-    return {"username": padding_current, "email": new_email, "profile_url": user_data.get("profile_url", "")}
+    return {"username": clean_current, "email": new_email, "profile_url": user_data.get("profile_url", "")}
 
 @app.delete("/auth/profile/{username}")
 def delete_user_account(username: str):
