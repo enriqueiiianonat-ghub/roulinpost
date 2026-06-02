@@ -23,7 +23,6 @@ resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
 
-# Change this near the top of your main.py:
 UPLOAD_DIR = Path("/tmp/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -101,7 +100,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
         if is_video:
             unique_id = uuid.uuid4()
 
-            # Save original upload
             temp_input = tempfile.NamedTemporaryFile(
                 delete=False,
                 suffix=os.path.splitext(f_name)[1] or ".tmp"
@@ -115,31 +113,20 @@ async def process_and_upload_media(file: UploadFile) -> str:
             )
             temp_output.close()
 
-            # 🔥 INCORPORATED PIPELINE EXCEPTION HANDLER OVER THE SUBPROCESS MODULE
             use_fallback_upload = False
             try:
-                # Convert EVERYTHING to browser-safe MP4 via native FFmpeg core binary
                 subprocess.run(
                     [
                         "ffmpeg",
                         "-y",
                         "-i", temp_input.name,
-
-                        # Video codec
                         "-c:v", "libx264",
                         "-preset", "fast",
                         "-crf", "23",
-
-                        # Audio codec
                         "-c:a", "aac",
                         "-b:a", "128k",
-
-                        # Web streaming optimization
                         "-movflags", "+faststart",
-
-                        # Compatibility
                         "-pix_fmt", "yuv420p",
-
                         temp_output.name,
                     ],
                     check=True,
@@ -147,16 +134,20 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     stderr=subprocess.PIPE,
                 )
             except (FileNotFoundError, Exception) as e:
-                print(f"⚠️ Local frame extractor skipped or ffmpeg/ffprobe binary not found in PATH environment: {e}")
-                # Toggle recovery flag to switch from an empty string directly into the fallback data upload
+                print(f"⚠️ Local frame extractor skipped or ffmpeg binary missing: {e}")
                 use_fallback_upload = True
 
             try:
                 blob_path = f"videos/{unique_id}.mp4"
                 blob = bucket.blob(blob_path)
 
+                # Set global cross-origin metadata configurations so live browsers can fetch bytes smoothly
+                blob.metadata = {
+                    "contentType": "video/mp4",
+                    "contentDisposition": "inline"
+                }
+
                 if use_fallback_upload:
-                    # If ffmpeg is missing on system, upload source video file directly to bypass blocking
                     blob.upload_from_filename(
                         temp_input.name,
                         content_type="video/mp4"
@@ -178,7 +169,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                     os.remove(temp_input.name)
                 except:
                     pass
-
                 try:
                     os.remove(temp_output.name)
                 except:
@@ -206,7 +196,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 return blob.public_url
             except Exception as img_err:
                 print(f"⚠️ Image parsing failed: {img_err}")
-                unique_id = uuid.uuid4()
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": "image/jpeg"}
@@ -222,7 +211,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
             status_code=500,
             detail="Video conversion failed."
         )
-
     except Exception as e:
         print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
