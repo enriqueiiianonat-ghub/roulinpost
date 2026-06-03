@@ -361,6 +361,7 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
     for doc in docs:
         d = doc.to_dict()
         author = d.get("username", "")
+        post_id = doc.id
         
         # Pull extra profile info for metadata presentation fields
         if author not in author_cache:
@@ -374,16 +375,23 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
                 }
             else:
                 author_cache[author] = {"avatar": "", "country": "", "city": ""}
+        
+        # ✨ FIX: Compute real-time subcollection document length on database read
+        comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
+        
+        # Use aggregation count directly for optimized, fast lookups
+        comment_count = comments_ref.count().get()[0][0].value
                 
         posts.append({
-            "id": doc.id,
+            "id": post_id,
             "username": author,
             "user_avatar": author_cache[author]["avatar"], 
             "author_country": author_cache[author]["country"], # ✨ NEW field payload
             "author_city": author_cache[author]["city"],       # ✨ NEW field payload
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []), 
-            "likes": d.get("likes", 0)
+            "likes": d.get("likes", 0),
+            "comment_count": comment_count                     # ✨ Integrated live count variable
         })
     return posts
 
