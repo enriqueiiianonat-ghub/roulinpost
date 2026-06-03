@@ -16,6 +16,8 @@ from pathlib import Path
 from PIL import Image, ImageOps
 import tempfile
 import subprocess
+from pydantic import BaseModel
+import time
 
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
@@ -456,6 +458,46 @@ def like_post(post_id: str):
         raise HTTPException(status_code=404, detail="Post not found")
     post_ref.update({'likes': firestore.Increment(1)})
     return {"message": "Liked"}
+
+
+
+class CommentModel(BaseModel):
+    username: str
+    text: str
+
+@app.get("/posts/{post_id}/comments")
+def get_comments(post_id: str):
+    # Fetch subcollection documents inside target post document
+    comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
+    docs = comments_ref.order_by("timestamp", direction=firestore.Query.ASCENDING).get()
+    
+    comments_list = []
+    for doc in docs:
+        d = doc.to_dict()
+        comments_list.append({
+            "username": d.get("username"),
+            "text": d.get("text"),
+            "timestamp": d.get("timestamp")
+        })
+    return comments_list
+
+@app.post("/posts/{post_id}/comments")
+def add_comment(post_id: str, comment: CommentModel):
+    if not comment.text.strip():
+        raise HTTPException(status_code=400, detail="Comment cannot be blank")
+        
+    post_ref = db_fs.collection('posts').document(post_id)
+    if not post_ref.get().exists:
+        raise HTTPException(status_code=404, detail="Post not found")
+        
+    # Append comment payload directly into targeted inner Firestore subcollection
+    comment_data = {
+        "username": comment.username.strip(),
+        "text": comment.text.strip(),
+        "timestamp": int(time.time())
+    }
+    post_ref.collection('comments').add(comment_data)
+    return {"status": "success"}
 
 @app.delete("/posts/{post_id}")
 def delete_post(post_id: str, username: str):
