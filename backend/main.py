@@ -239,13 +239,21 @@ def login(user: UserLogin):
     if not user_ref.exists or user_ref.to_dict().get("password") != user.password:
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     u_data = user_ref.to_dict()
-    return {"username": login_username, "email": u_data.get("email"), "profile_url": u_data.get("profile_url", "")}
+    return {
+        "username": login_username, 
+        "email": u_data.get("email"), 
+        "profile_url": u_data.get("profile_url", ""),
+        "country": u_data.get("country", ""),  # ✨ Fetches saved string or sets blank
+        "city": u_data.get("city", "")         # ✨ Fetches saved string or sets blank
+    }
 
 @app.put("/auth/profile/{current_username}")
 async def update_profile(
     current_username: str,
     new_username: str = Form(...),
     new_email: str = Form(...),
+    country: Optional[str] = Form(""),  # ✨ Intercept country field element stream
+    city: Optional[str] = Form(""),     # ✨ Intercept city field element stream
     new_password: Optional[str] = Form(None),
     avatar_file: Optional[UploadFile] = File(None)
 ):
@@ -271,6 +279,10 @@ async def update_profile(
         avatar_bytes = await avatar_file.read()
         user_data['profile_url'] = process_and_upload_avatar(avatar_bytes)
 
+    # ✨ Append the metadata updates cleanly into structural state payload
+    user_data['country'] = country or ""
+    user_data['city'] = city or ""
+
     if clean_new != padding_current:
         new_ref = db_fs.collection('users').document(clean_new)
         if new_ref.get().exists:
@@ -281,13 +293,25 @@ async def update_profile(
             user_data['password'] = new_password
         new_ref.set(user_data)
         user_ref.delete()
-        return {"username": clean_new, "email": new_email, "profile_url": user_data.get("profile_url", "")}
+        return {
+            "username": clean_new, 
+            "email": new_email, 
+            "profile_url": user_data.get("profile_url", ""),
+            "country": user_data['country'],
+            "city": user_data['city']
+        }
 
     user_data['email'] = new_email
     if new_password:
         user_data['password'] = new_password
     user_ref.set(user_data)
-    return {"username": padding_current, "email": new_email, "profile_url": user_data.get("profile_url", "")}
+    return {
+        "username": padding_current, 
+        "email": new_email, 
+        "profile_url": user_data.get("profile_url", ""),
+        "country": user_data['country'],
+        "city": user_data['city']
+    }
 
 @app.delete("/auth/profile/{username}")
 def delete_user_account(username: str):
@@ -330,17 +354,31 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
     
     docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
     posts = []
-    avatar_cache = {}
+    author_cache = {}
+    
     for doc in docs:
         d = doc.to_dict()
         author = d.get("username", "")
-        if author not in avatar_cache:
+        
+        # Pull extra profile info for metadata presentation fields
+        if author not in author_cache:
             author_ref = db_fs.collection('users').document(author).get()
-            avatar_cache[author] = author_ref.to_dict().get("profile_url", "") if author_ref.exists else ""
+            if author_ref.exists:
+                auth_data = author_ref.to_dict()
+                author_cache[author] = {
+                    "avatar": auth_data.get("profile_url", ""),
+                    "country": auth_data.get("country", ""),
+                    "city": auth_data.get("city", "")
+                }
+            else:
+                author_cache[author] = {"avatar": "", "country": "", "city": ""}
+                
         posts.append({
             "id": doc.id,
             "username": author,
-            "user_avatar": avatar_cache[author], 
+            "user_avatar": author_cache[author]["avatar"], 
+            "author_country": author_cache[author]["country"], # ✨ NEW field payload
+            "author_city": author_cache[author]["city"],       # ✨ NEW field payload
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []), 
             "likes": d.get("likes", 0)
