@@ -19,6 +19,11 @@ import subprocess
 from pydantic import BaseModel
 import time
 
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List
+import time
+
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
@@ -467,7 +472,44 @@ def like_post(post_id: str):
     post_ref.update({'likes': firestore.Increment(1)})
     return {"message": "Liked"}
 
+router = APIRouter()
 
+class ChatMessageSchema(BaseModel):
+    sender: str
+    recipient: str
+    text: str
+
+def get_conversation_id(user1: str, user2: str) -> str:
+    # Sort usernames alphabetically to maintain a unified channel between two users
+    sorted_users = sorted([user1.lower().strip(), user2.lower().strip()])
+    return f"{sorted_users[0]}_{sorted_users[1]}"
+
+@app.post("/chat/send")
+def send_direct_message(payload: ChatMessageSchema):
+    if not payload.text.strip():
+        raise HTTPException(status_code=400, detail="Message body cannot be blank.")
+        
+    conv_id = get_conversation_id(payload.sender, payload.recipient)
+    now_ts = int(time.time())
+    
+    # 1. Update conversational overview channel meta documentation
+    chat_room_ref = db_fs.collection('chats').document(conv_id)
+    chat_room_ref.set({
+        "participants": [payload.sender, payload.recipient],
+        "last_message": payload.text,
+        "last_updated": now_ts
+    }, merge=True)
+    
+    # 2. Inject structural message document directly into subcollection payload
+    message_ref = chat_room_ref.collection('messages').document()
+    message_ref.set({
+        "sender": payload.sender,
+        "recipient": payload.recipient,
+        "text": payload.text,
+        "timestamp": now_ts
+    })
+    
+    return {"status": "success", "message_id": message_ref.id}
 
 class CommentModel(BaseModel):
     username: str
@@ -506,6 +548,35 @@ def add_comment(post_id: str, comment: CommentModel):
     }
     post_ref.collection('comments').add(comment_data)
     return {"status": "success"}
+
+@app.get("/chat/history/{conversation_id}")
+def get_chat_history(conversation_id: str):
+
+    chat_ref = (
+        db_fs.collection("chats")
+        .document(conversation_id)
+        .collection("messages")
+    )
+
+    docs = (
+        chat_ref
+        .order_by("timestamp", direction=firestore.Query.ASCENDING)
+        .stream()
+    )
+
+    messages = []
+
+    for doc in docs:
+        d = doc.to_dict()
+
+        messages.append({
+            "sender": d.get("sender"),
+            "recipient": d.get("recipient"),
+            "text": d.get("text"),
+            "timestamp": d.get("timestamp")
+        })
+
+    return messages
 
 @app.delete("/posts/{post_id}")
 def delete_post(post_id: str, username: str):
