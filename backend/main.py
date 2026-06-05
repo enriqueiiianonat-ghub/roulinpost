@@ -597,3 +597,68 @@ def delete_post(post_id: str, username: str):
             
     post_ref.delete()
     return {"message": "Deleted"}
+
+@app.get("/users/friends")
+def get_all_friends():
+    try:
+        users_ref = db_fs.collection('users').get()
+        friends_list = []
+        for doc in users_ref:
+            u_data = doc.to_dict()
+            friends_list.append({
+                "username": u_data.get("username"),
+                "profile_url": u_data.get("profile_url", "")
+            })
+        return friends_list
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+class FriendActionModel(BaseModel):
+    current_user: str
+    target_user: str
+
+@app.post("/users/add-friend")
+def add_friend(payload: FriendActionModel):
+    user_a = payload.current_user.strip().lower()
+    user_b = payload.target_user.strip().lower()
+    if user_a == user_b:
+        raise HTTPException(status_code=400, detail="You cannot add yourself.")
+    
+    # Save relation document inside current_user's subcollection
+    db_fs.collection('users').document(user_a).collection('friends').document(user_b).set({
+        "username": user_b,
+        "timestamp": int(time.time())
+    })
+    return {"status": "success"}
+
+@app.get("/users/friends/{username}")
+def get_user_friends(username: str, search: Optional[str] = None):
+    clean_user = username.strip().lower()
+    friends_ref = db_fs.collection('users').document(clean_user).collection('friends')
+    docs = friends_ref.get()
+    
+    friend_usernames = [doc.id for doc in docs]
+    if not friend_usernames:
+        return []
+
+    friends_list = []
+    # Pull profile data for each found connection matching optional search constraint
+    for f_user in friend_usernames:
+        if search and search.strip().lower() not in f_user:
+            continue
+        u_snap = db_fs.collection('users').document(f_user).get()
+        if u_snap.exists:
+            u_data = u_snap.to_dict()
+            friends_list.append({
+                "username": f_user,
+                "profile_url": u_data.get("profile_url", "")
+            })
+    return friends_list
+
+@app.get("/users/is-friend")
+def check_friend_status(current_user: str, target_user: str):
+    user_a = current_user.strip().lower()
+    user_b = target_user.strip().lower()
+    is_friend = db_fs.collection('users').document(user_a).collection('friends').document(user_b).get().exists
+    return {"is_friend": is_friend}
