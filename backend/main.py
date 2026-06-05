@@ -625,26 +625,51 @@ def add_friend(payload: FriendActionModel):
     if user_a == user_b:
         raise HTTPException(status_code=400, detail="You cannot add yourself.")
     
-    # Save relation document inside current_user's subcollection
+    # Send a request: user_a saves it as 'outgoing' status pending
     db_fs.collection('users').document(user_a).collection('friends').document(user_b).set({
         "username": user_b,
+        "status": "outgoing",
         "timestamp": int(time.time())
     })
+    
+    # Target user receives it as 'incoming' status pending
+    db_fs.collection('users').document(user_b).collection('friends').document(user_a).set({
+        "username": user_a,
+        "status": "incoming",
+        "timestamp": int(time.time())
+    })
+    return {"status": "success", "message": "Friend request sent."}
+
+@app.post("/users/accept-friend")
+def accept_friend(payload: FriendActionModel):
+    user_a = payload.current_user.strip().lower() # The person accepting
+    user_b = payload.target_user.strip().lower()  # The person who sent it
+    
+    # Update both sides to accepted status
+    db_fs.collection('users').document(user_a).collection('friends').document(user_b).update({"status": "accepted"})
+    db_fs.collection('users').document(user_b).collection('friends').document(user_a).update({"status": "accepted"})
+    return {"status": "success"}
+
+@app.post("/users/decline-friend")
+def decline_friend(payload: FriendActionModel):
+    user_a = payload.current_user.strip().lower()
+    user_b = payload.target_user.strip().lower()
+    
+    # Delete relations entirely if declined/removed
+    db_fs.collection('users').document(user_a).collection('friends').document(user_b).delete()
+    db_fs.collection('users').document(user_b).collection('friends').document(user_a).delete()
     return {"status": "success"}
 
 @app.get("/users/friends/{username}")
 def get_user_friends(username: str, search: Optional[str] = None):
     clean_user = username.strip().lower()
-    friends_ref = db_fs.collection('users').document(clean_user).collection('friends')
+    # Filter query directly for accepted friendships
+    friends_ref = db_fs.collection('users').document(clean_user).collection('friends').where(filter=firestore.FieldFilter("status", "==", "accepted"))
     docs = friends_ref.get()
     
-    friend_usernames = [doc.id for doc in docs]
-    if not friend_usernames:
-        return []
-
     friends_list = []
-    # Pull profile data for each found connection matching optional search constraint
-    for f_user in friend_usernames:
+    for doc in docs:
+        f_user = doc.id
         if search and search.strip().lower() not in f_user:
             continue
         u_snap = db_fs.collection('users').document(f_user).get()
@@ -655,6 +680,42 @@ def get_user_friends(username: str, search: Optional[str] = None):
                 "profile_url": u_data.get("profile_url", "")
             })
     return friends_list
+
+@app.get("/users/friend-status")
+def check_friend_status(current_user: str, target_user: str):
+    user_a = current_user.strip().lower()
+    user_b = target_user.strip().lower()
+    
+    doc = db_fs.collection('users').document(user_a).collection('friends').document(user_b).get()
+    if not doc.exists:
+        return {"status": "none"}
+    return {"status": doc.to_dict().get("status", "none")}
+
+@app.get("/users/notifications-count/{username}")
+def get_notifications_badge_count(username: str):
+    clean_user = username.strip().lower()
+    
+    # Count incoming requests that are pending approval
+    pending_count = db_fs.collection('users').document(clean_user).collection('friends').where(filter=firestore.FieldFilter("status", "==", "incoming")).count().get()[0][0].value
+    
+    return {"incoming_requests": pending_count}
+
+@app.get("/users/pending-requests/{username}")
+def get_pending_requests(username: str):
+    clean_user = username.strip().lower()
+    docs = db_fs.collection('users').document(clean_user).collection('friends').where(filter=firestore.FieldFilter("status", "==", "incoming")).get()
+    
+    requests_list = []
+    for doc in docs:
+        req_user = doc.id
+        u_snap = db_fs.collection('users').document(req_user).get()
+        if u_snap.exists:
+            u_data = u_snap.to_dict()
+            requests_list.append({
+                "username": req_user,
+                "profile_url": u_data.get("profile_url", "")
+            })
+    return requests_list
 
 @app.get("/users/is-friend")
 def check_friend_status(current_user: str, target_user: str):
