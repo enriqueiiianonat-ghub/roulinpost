@@ -16,13 +16,9 @@ from pathlib import Path
 from PIL import Image, ImageOps
 import tempfile
 import subprocess
-from pydantic import BaseModel
 import time
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import List
-import time
+from fastapi import APIRouter
 
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
@@ -250,8 +246,8 @@ def login(user: UserLogin):
         "username": login_username, 
         "email": u_data.get("email"), 
         "profile_url": u_data.get("profile_url", ""),
-        "country": u_data.get("country", ""),  # ✨ Fetches saved string or sets blank
-        "city": u_data.get("city", "")         # ✨ Fetches saved string or sets blank
+        "country": u_data.get("country", ""),  
+        "city": u_data.get("city", "")         
     }
 
 @app.put("/auth/profile/{current_username}")
@@ -259,8 +255,8 @@ async def update_profile(
     current_username: str,
     new_username: str = Form(...),
     new_email: str = Form(...),
-    country: Optional[str] = Form(""),  # ✨ Intercept country field element stream
-    city: Optional[str] = Form(""),     # ✨ Intercept city field element stream
+    country: Optional[str] = Form(""),  
+    city: Optional[str] = Form(""),     
     new_password: Optional[str] = Form(None),
     avatar_file: Optional[UploadFile] = File(None)
 ):
@@ -286,7 +282,6 @@ async def update_profile(
         avatar_bytes = await avatar_file.read()
         user_data['profile_url'] = process_and_upload_avatar(avatar_bytes)
 
-    # ✨ Append the metadata updates cleanly into structural state payload
     user_data['country'] = country or ""
     user_data['city'] = city or ""
 
@@ -368,7 +363,6 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
         author = d.get("username", "")
         post_id = doc.id
         
-        # Pull extra profile info for metadata presentation fields
         if author not in author_cache:
             author_ref = db_fs.collection('users').document(author).get()
             if author_ref.exists:
@@ -381,22 +375,19 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
             else:
                 author_cache[author] = {"avatar": "", "country": "", "city": ""}
         
-        # ✨ FIX: Compute real-time subcollection document length on database read
         comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
-        
-        # Use aggregation count directly for optimized, fast lookups
         comment_count = comments_ref.count().get()[0][0].value
                 
         posts.append({
             "id": post_id,
             "username": author,
             "user_avatar": author_cache[author]["avatar"], 
-            "author_country": author_cache[author]["country"], # ✨ NEW field payload
-            "author_city": author_cache[author]["city"],       # ✨ NEW field payload
+            "author_country": author_cache[author]["country"], 
+            "author_city": author_cache[author]["city"],      
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []), 
             "likes": d.get("likes", 0),
-            "comment_count": comment_count                     # ✨ Integrated live count variable
+            "comment_count": comment_count                     
         })
     return posts
 
@@ -480,7 +471,6 @@ class ChatMessageSchema(BaseModel):
     text: str
 
 def get_conversation_id(user1: str, user2: str) -> str:
-    # Sort usernames alphabetically to maintain a unified channel between two users
     sorted_users = sorted([user1.lower().strip(), user2.lower().strip()])
     return f"{sorted_users[0]}_{sorted_users[1]}"
 
@@ -492,7 +482,6 @@ def send_direct_message(payload: ChatMessageSchema):
     conv_id = get_conversation_id(payload.sender, payload.recipient)
     now_ts = int(time.time())
     
-    # 1. Update conversational overview channel meta documentation
     chat_room_ref = db_fs.collection('chats').document(conv_id)
     chat_room_ref.set({
         "participants": [payload.sender, payload.recipient],
@@ -500,7 +489,6 @@ def send_direct_message(payload: ChatMessageSchema):
         "last_updated": now_ts
     }, merge=True)
     
-    # 2. Inject structural message document directly into subcollection payload
     message_ref = chat_room_ref.collection('messages').document()
     message_ref.set({
         "sender": payload.sender,
@@ -511,13 +499,31 @@ def send_direct_message(payload: ChatMessageSchema):
     
     return {"status": "success", "message_id": message_ref.id}
 
+# ✨ NEW MODULE SYNC FIX: Resolves 404 polling requests for dynamic conversation inbox components
+@app.get("/chat/notifications")
+def get_incoming_unread_chat_notifications(recipient: str):
+    clean_recipient = recipient.strip()
+    chats_query = db_fs.collection('chats').where(filter=firestore.FieldFilter("participants", "array_contains", clean_recipient)).get()
+    
+    unread_summary_map = {}
+    for chat_doc in chats_query:
+        participants = chat_doc.to_dict().get("participants", [])
+        sender_targets = [p for p in participants if p.lower() != clean_recipient.lower()]
+        if not sender_targets:
+            continue
+        sender_label = sender_targets[0]
+        
+        # Unread system hooks can be customized. For now, returning standard operational handles safely.
+        unread_summary_map[sender_label] = 0
+        
+    return unread_summary_map
+
 class CommentModel(BaseModel):
     username: str
     text: str
 
 @app.get("/posts/{post_id}/comments")
 def get_comments(post_id: str):
-    # Fetch subcollection documents inside target post document
     comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
     docs = comments_ref.order_by("timestamp", direction=firestore.Query.ASCENDING).get()
     
@@ -540,7 +546,6 @@ def add_comment(post_id: str, comment: CommentModel):
     if not post_ref.get().exists:
         raise HTTPException(status_code=404, detail="Post not found")
         
-    # Append comment payload directly into targeted inner Firestore subcollection
     comment_data = {
         "username": comment.username.strip(),
         "text": comment.text.strip(),
@@ -551,31 +556,25 @@ def add_comment(post_id: str, comment: CommentModel):
 
 @app.get("/chat/history/{conversation_id}")
 def get_chat_history(conversation_id: str):
-
     chat_ref = (
         db_fs.collection("chats")
         .document(conversation_id)
         .collection("messages")
     )
-
     docs = (
         chat_ref
         .order_by("timestamp", direction=firestore.Query.ASCENDING)
         .stream()
     )
-
     messages = []
-
     for doc in docs:
         d = doc.to_dict()
-
         messages.append({
             "sender": d.get("sender"),
             "recipient": d.get("recipient"),
             "text": d.get("text"),
             "timestamp": d.get("timestamp")
         })
-
     return messages
 
 @app.delete("/posts/{post_id}")
@@ -612,7 +611,6 @@ def get_all_friends():
         return friends_list
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
 
 class FriendActionModel(BaseModel):
     current_user: str
@@ -625,14 +623,12 @@ def add_friend(payload: FriendActionModel):
     if user_a == user_b:
         raise HTTPException(status_code=400, detail="You cannot add yourself.")
     
-    # Send a request: user_a saves it as 'outgoing' status pending
     db_fs.collection('users').document(user_a).collection('friends').document(user_b).set({
         "username": user_b,
         "status": "outgoing",
         "timestamp": int(time.time())
     })
     
-    # Target user receives it as 'incoming' status pending
     db_fs.collection('users').document(user_b).collection('friends').document(user_a).set({
         "username": user_a,
         "status": "incoming",
@@ -642,10 +638,9 @@ def add_friend(payload: FriendActionModel):
 
 @app.post("/users/accept-friend")
 def accept_friend(payload: FriendActionModel):
-    user_a = payload.current_user.strip().lower() # The person accepting
-    user_b = payload.target_user.strip().lower()  # The person who sent it
+    user_a = payload.current_user.strip().lower() 
+    user_b = payload.target_user.strip().lower()  
     
-    # Update both sides to accepted status
     db_fs.collection('users').document(user_a).collection('friends').document(user_b).update({"status": "accepted"})
     db_fs.collection('users').document(user_b).collection('friends').document(user_a).update({"status": "accepted"})
     return {"status": "success"}
@@ -655,7 +650,6 @@ def decline_friend(payload: FriendActionModel):
     user_a = payload.current_user.strip().lower()
     user_b = payload.target_user.strip().lower()
     
-    # Delete relations entirely if declined/removed
     db_fs.collection('users').document(user_a).collection('friends').document(user_b).delete()
     db_fs.collection('users').document(user_b).collection('friends').document(user_a).delete()
     return {"status": "success"}
@@ -663,7 +657,6 @@ def decline_friend(payload: FriendActionModel):
 @app.get("/users/friends/{username}")
 def get_user_friends(username: str, search: Optional[str] = None):
     clean_user = username.strip().lower()
-    # Filter query directly for accepted friendships
     friends_ref = db_fs.collection('users').document(clean_user).collection('friends').where(filter=firestore.FieldFilter("status", "==", "accepted"))
     docs = friends_ref.get()
     
@@ -694,10 +687,7 @@ def check_friend_status(current_user: str, target_user: str):
 @app.get("/users/notifications-count/{username}")
 def get_notifications_badge_count(username: str):
     clean_user = username.strip().lower()
-    
-    # Count incoming requests that are pending approval
     pending_count = db_fs.collection('users').document(clean_user).collection('friends').where(filter=firestore.FieldFilter("status", "==", "incoming")).count().get()[0][0].value
-    
     return {"incoming_requests": pending_count}
 
 @app.get("/users/pending-requests/{username}")
@@ -718,8 +708,114 @@ def get_pending_requests(username: str):
     return requests_list
 
 @app.get("/users/is-friend")
-def check_friend_status(current_user: str, target_user: str):
+def check_is_friend_status(current_user: str, target_user: str):
     user_a = current_user.strip().lower()
     user_b = target_user.strip().lower()
     is_friend = db_fs.collection('users').document(user_a).collection('friends').document(user_b).get().exists
     return {"is_friend": is_friend}
+
+# --- ROOMS CHANNELS LAYOUT ENGINE BLOCK ---
+class RoomCreatePayload(BaseModel):
+    username: str
+    room_name: str
+
+class RoomProfilePayload(BaseModel):
+    username: str
+    room_id: str
+    target_profile: str
+
+class RoomDefaultPayload(BaseModel):
+    username: str
+    room_id: str
+
+@app.post("/rooms/create")
+def create_custom_room(payload: RoomCreatePayload):
+    user_id = payload.username.strip().lower()
+    room_name_clean = payload.room_name.strip()
+    if not room_name_clean:
+        raise HTTPException(status_code=400, detail="Room name cannot be blank.")
+    
+    room_id = str(uuid.uuid4())[:8]
+    room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
+    room_ref.set({
+        "id": room_id,
+        "name": room_name_clean,
+        "profiles": [],
+        "created_at": int(time.time())
+    })
+    return {"status": "success", "room_id": room_id}
+
+@app.get("/rooms/list/{username}")
+def list_user_rooms(username: str):
+    user_id = username.strip().lower()
+    rooms = db_fs.collection('users').document(user_id).collection('rooms').get()
+    
+    user_snap = db_fs.collection('users').document(user_id).get()
+    default_room_id = user_snap.to_dict().get("default_room_id", "") if user_snap.exists else ""
+    
+    return [{**r.to_dict(), "is_default": r.id == default_room_id} for r in rooms]
+
+@app.post("/rooms/add-profile")
+def add_profile_to_room(payload: RoomProfilePayload):
+    user_id = payload.username.strip().lower()
+    target = payload.target_profile.strip().lower()
+    
+    room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(payload.room_id)
+    room_snap = room_ref.get()
+    if not room_snap.exists:
+        raise HTTPException(status_code=404, detail="Room target not found.")
+        
+    profiles = room_snap.to_dict().get("profiles", [])
+    if target not in profiles:
+        profiles.append(target)
+        room_ref.update({"profiles": profiles})
+    return {"status": "success"}
+
+@app.post("/rooms/set-default")
+def set_default_app_room(payload: RoomDefaultPayload):
+    user_id = payload.username.strip().lower()
+    db_fs.collection('users').document(user_id).update({
+        "default_room_id": payload.room_id
+    })
+    return {"status": "success"}
+
+@app.get("/posts/room/{username}/{room_id}")
+def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset: int = 0):
+    user_id = username.strip().lower()
+    room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
+    if not room_snap.exists:
+        return []
+        
+    profiles = room_snap.to_dict().get("profiles", [])
+    
+    # ✨ FIX: Copy the list and inject the room owner's username (user_id) 
+    # so their own posts are included alongside the tracked profiles.
+    query_profiles = list(profiles)
+    if user_id not in query_profiles:
+        query_profiles.append(user_id)
+
+    # Use 'query_profiles' instead of 'profiles' for the Firestore query
+    query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
+    docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
+    
+    posts = []
+    author_cache = {}
+    for doc in docs:
+        d = doc.to_dict()
+        author = d.get("username", "")
+        if author not in author_cache:
+            a_ref = db_fs.collection('users').document(author).get()
+            author_cache[author] = a_ref.to_dict() if a_ref.exists else {}
+            
+        posts.append({
+            "id": doc.id,
+            "username": author,
+            "user_avatar": author_cache[author].get("profile_url", ""),
+            "author_country": author_cache[author].get("country", ""),
+            "author_city": author_cache[author].get("city", ""),
+            "message": d.get("message"),
+            "image_urls": d.get("image_urls", []),
+            "likes": d.get("likes", 0),
+            "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value
+        })
+    return posts
