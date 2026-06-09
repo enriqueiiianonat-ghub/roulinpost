@@ -378,6 +378,7 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
         comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
         comment_count = comments_ref.count().get()[0][0].value
                 
+        # Inside your post list dictionary loop constructors, make sure to return the raw timestamp string data:
         posts.append({
             "id": post_id,
             "username": author,
@@ -387,7 +388,8 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []), 
             "likes": d.get("likes", 0),
-            "comment_count": comment_count                     
+            "comment_count": comment_count,
+            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None # 
         })
     return posts
 
@@ -494,7 +496,8 @@ def send_direct_message(payload: ChatMessageSchema):
         "sender": payload.sender,
         "recipient": payload.recipient,
         "text": payload.text,
-        "timestamp": now_ts
+        "timestamp": now_ts,
+        "read": False  #  Initialize as unread
     })
     
     return {"status": "success", "message_id": message_ref.id}
@@ -502,19 +505,25 @@ def send_direct_message(payload: ChatMessageSchema):
 # ✨ NEW MODULE SYNC FIX: Resolves 404 polling requests for dynamic conversation inbox components
 @app.get("/chat/notifications")
 def get_incoming_unread_chat_notifications(recipient: str):
-    clean_recipient = recipient.strip()
-    chats_query = db_fs.collection('chats').where(filter=firestore.FieldFilter("participants", "array_contains", clean_recipient)).get()
+    clean_recipient = recipient.strip().lower()
+    chats_query = db_fs.collection('chats').where(
+        filter=firestore.FieldFilter("participants", "array_contains", recipient)
+    ).get()
     
     unread_summary_map = {}
     for chat_doc in chats_query:
         participants = chat_doc.to_dict().get("participants", [])
-        sender_targets = [p for p in participants if p.lower() != clean_recipient.lower()]
+        sender_targets = [p for p in participants if p.lower().strip() != clean_recipient]
         if not sender_targets:
             continue
         sender_label = sender_targets[0]
         
-        # Unread system hooks can be customized. For now, returning standard operational handles safely.
-        unread_summary_map[sender_label] = 0
+        # Check for messages from the chat partner that are unread
+        messages_ref = chat_doc.reference.collection('messages')
+        unread_docs = messages_ref.where(filter=firestore.FieldFilter("sender", "==", sender_label)).where(filter=firestore.FieldFilter("read", "==", False)).get()
+        
+        # Count them or set to 1 if any unread exists
+        unread_summary_map[sender_label] = len(unread_docs)
         
     return unread_summary_map
 
@@ -819,3 +828,19 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
             "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value
         })
     return posts
+
+class ReadReceiptPayload(BaseModel):
+    conversation_id: str
+    recipient: str  # Current user who is reading the messages
+    sender: str     # Chat partner whose messages are being marked read
+
+@app.post("/chat/read")
+def mark_messages_as_read(payload: ReadReceiptPayload):
+    chat_ref = db_fs.collection("chats").document(payload.conversation_id).collection("messages")
+    # Fetch all unread messages sent by the partner to the current user
+    unread_messages = chat_ref.where(filter=firestore.FieldFilter("sender", "==", payload.sender.strip())).where(filter=firestore.FieldFilter("read", "==", False)).get()
+    
+    for doc in unread_messages:
+        doc.reference.update({"read": True})
+        
+    return {"status": "success", "updated_count": len(unread_messages)}
