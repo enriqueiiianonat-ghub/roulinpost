@@ -11,7 +11,7 @@ import random
 import resend
 import asyncio 
 import json as py_json
-import ffmpeg  
+import ffmpeg  # ✨ FIX: Removed hidden non-breaking space formatting artifact causing the SyntaxError
 from pathlib import Path
 from PIL import Image, ImageOps
 import tempfile
@@ -762,7 +762,8 @@ def list_user_rooms(username: str):
     user_snap = db_fs.collection('users').document(user_id).get()
     default_room_id = user_snap.to_dict().get("default_room_id", "") if user_snap.exists else ""
     
-    return [{**r.to_dict(), "is_default": r.id == default_room_id} for r in rooms]
+    # ✨ FIX: If default_room_id is an empty string "", r.id == default_room_id will evaluate to False for all rooms, unstarring everything.
+    return [{**r.to_dict(), "is_default": (default_room_id != "" and r.id == default_room_id)} for r in rooms]
 
 @app.post("/rooms/add-profile")
 def add_profile_to_room(payload: RoomProfilePayload):
@@ -828,7 +829,8 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []),
             "likes": d.get("likes", 0),
-            "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value
+            "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value,
+            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None # ✨ ADD THIS LINE
         })
     return posts
 
@@ -847,3 +849,31 @@ def mark_messages_as_read(payload: ReadReceiptPayload):
         doc.reference.update({"read": True})
         
     return {"status": "success", "updated_count": len(unread_messages)}
+
+class RoomUpdatePayload(BaseModel):
+    username: str
+    room_id: str
+    new_name: str
+    profiles: List[str]
+
+@app.put("/rooms/update")
+def update_custom_room(payload: RoomUpdatePayload):
+    user_id = payload.username.strip().lower()
+    room_id = payload.room_id.strip()
+    new_room_name = payload.new_name.strip()
+    
+    if not new_room_name:
+        raise HTTPException(status_code=400, detail="Room name cannot be blank.")
+        
+    room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
+    if not room_ref.get().exists:
+        raise HTTPException(status_code=404, detail="Room not found.")
+        
+    # Clean up and normalize the incoming profile lists data
+    cleaned_profiles = [p.strip().lower() for p in payload.profiles]
+    
+    room_ref.update({
+        "name": new_room_name,
+        "profiles": cleaned_profiles
+    })
+    return {"status": "success", "message": "Room updated successfully."}
