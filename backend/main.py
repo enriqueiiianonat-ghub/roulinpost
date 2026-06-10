@@ -790,20 +790,23 @@ def set_default_app_room(payload: RoomDefaultPayload):
 
 @app.get("/posts/room/{username}/{room_id}")
 def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset: int = 0):
+    # 1. First, cleanly extract and standardize the user ID variables
     user_id = username.strip().lower()
+    
+    # 2. Fetch the room database snapshot out of Firestore next
     room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
     if not room_snap.exists:
         return []
         
+    # 3. Pull the tracked guest profile records list 
     profiles = room_snap.to_dict().get("profiles", [])
     
-    # ✨ FIX: Copy the list and inject the room owner's username (user_id) 
-    # so their own posts are included alongside the tracked profiles.
+    # 4. Inject the room owner's username handle safely into a copy list
     query_profiles = list(profiles)
     if user_id not in query_profiles:
         query_profiles.append(user_id)
 
-    # Use 'query_profiles' instead of 'profiles' for the Firestore query
+    # 5. Build and execute the database query at the very end using the initialized fields
     query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
     docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
     
