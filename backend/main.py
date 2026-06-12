@@ -606,6 +606,32 @@ def delete_post(post_id: str, username: str):
     post_ref.delete()
     return {"message": "Deleted"}
 
+@app.get("/users/profile/{username}")
+def get_user_profile(username: str):
+    clean_user = username.strip().lower()
+
+    user_doc = db_fs.collection("users").document(clean_user).get()
+    if not user_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user_data = user_doc.to_dict()
+
+    post_count = (
+        db_fs.collection("posts")
+        .where(filter=firestore.FieldFilter("username", "==", clean_user))
+        .count()
+        .get()[0][0]
+        .value
+    )
+
+    return {
+        "username": clean_user,
+        "profile_url": user_data.get("profile_url", ""),
+        "country": user_data.get("country", ""),
+        "city": user_data.get("city", ""),
+        "post_count": post_count
+    }
+
 @app.get("/users/friends")
 def get_all_friends():
     try:
