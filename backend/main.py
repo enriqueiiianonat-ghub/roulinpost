@@ -903,3 +903,31 @@ def update_custom_room(payload: RoomUpdatePayload):
         "profiles": cleaned_profiles
     })
     return {"status": "success", "message": "Room updated successfully."}
+
+@app.get("/users/profile/{username}/media")
+def get_user_profile_media(username: str):
+    clean_user = username.strip().lower()
+    
+    # Query all posts created by this specific user
+    posts_query = db_fs.collection('posts').where(
+        filter=firestore.FieldFilter("username", "==", clean_user)
+    ).get()
+    
+    photos = []
+    videos = []
+    
+    for doc in posts_query:
+        post_data = doc.to_dict()
+        image_urls = post_data.get("image_urls", [])
+        
+        for url in image_urls:
+            # Differentiate based on the file storage prefix or path signature
+            if "videos/" in url or url.lower().endswith(('.mp4', '.mov', '.avi', '.webm')):
+                videos.append(url)
+            else:
+                photos.append(url)
+                
+    return {
+        "photos": photos,
+        "videos": videos
+    }
