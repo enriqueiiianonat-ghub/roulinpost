@@ -35,6 +35,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RoomInvitePayload(BaseModel):
+    username: str        # Sender / Room Owner
+    room_id: str         # The Room ID being shared
+    target_user: str     # The user being invited
+
+class HandleInvitePayload(BaseModel):
+    username: str        # The user handling the invite (recipient)
+    invitation_id: str   # The ID of the invitation document
+    action: str          # "accept" or "decline"
+
+
 # --- FIREBASE INITIALIZATION BLOCK ---
 CERT_PATH = "meshmeedb-firebase-adminsdk-fbsvc-c33dc12e77.json"
 BUCKET_NAME = "meshmeedb.firebasestorage.app"
@@ -397,6 +408,7 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
 async def create_post(
     username: str = Form(...),
     message: Optional[str] = Form(None),
+    target_room_id: Optional[str] = Form(None), # Added parameter field
     files: List[UploadFile] = File([])
 ):
     if len(files) > 12:
@@ -404,17 +416,20 @@ async def create_post(
 
     tasks = [process_and_upload_media(f) for f in files]
     results = await asyncio.gather(*tasks)
-    
     media_urls = [url for url in results if url]
             
     post_ref = db_fs.collection('posts').document()
-    post_ref.set({
+    post_data = {
         'username': username,
         'message': message or "",
         'image_urls': media_urls, 
         'likes': 0,
         'timestamp': firestore.SERVER_TIMESTAMP  
-    })
+    }
+    if target_room_id:
+        post_data['target_room_id'] = target_room_id
+        
+    post_ref.set(post_data)
     return {"message": "Post created successfully"}
 
 @app.put("/posts/{post_id}")
@@ -788,7 +803,6 @@ def list_user_rooms(username: str):
     user_snap = db_fs.collection('users').document(user_id).get()
     default_room_id = user_snap.to_dict().get("default_room_id", "") if user_snap.exists else ""
     
-    # ✨ FIX: If default_room_id is an empty string "", r.id == default_room_id will evaluate to False for all rooms, unstarring everything.
     return [{**r.to_dict(), "is_default": (default_room_id != "" and r.id == default_room_id)} for r in rooms]
 
 @app.post("/rooms/add-profile")
@@ -817,24 +831,31 @@ def set_default_app_room(payload: RoomDefaultPayload):
 
 @app.get("/posts/room/{username}/{room_id}")
 def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset: int = 0):
-    # 1. First, cleanly extract and standardize the user ID variables
     user_id = username.strip().lower()
     
-    # 2. Fetch the room database snapshot out of Firestore next
+    # Find the room configuration (check if user is owner, otherwise fetch from owner's collection)
     room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
     if not room_snap.exists:
         return []
         
-    # 3. Pull the tracked guest profile records list 
-    profiles = room_snap.to_dict().get("profiles", [])
+    room_data = room_snap.to_dict()
+    owner_id = room_data.get("owner", user_id) # Falls back to user_id if they are the owner
     
-    # 4. Inject the room owner's username handle safely into a copy list
-    query_profiles = list(profiles)
-    if user_id not in query_profiles:
-        query_profiles.append(user_id)
+    # Pull master room data directly from the owner's record
+    master_room = db_fs.collection('users').document(owner_id).collection('rooms').document(room_id).get()
+    if not master_room.exists:
+        return []
+        
+    master_data = master_room.to_dict()
+    profiles = master_data.get("profiles", [])
+    joined_members = master_data.get("joined_members", [])
+    
+    # Collect all users authorized to broadcast updates into this timeline
+    query_profiles = list(set(profiles + joined_members + [owner_id]))
 
-    # 5. Build and execute the database query at the very end using the initialized fields
     query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
+    
+    # ✨ FILTER LOGIC: Filter out posts unless they are tagged with this room or belong to a profile tracking rule
     docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
     
     posts = []
@@ -842,6 +863,12 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
     for doc in docs:
         d = doc.to_dict()
         author = d.get("username", "")
+        
+        # If the post is from a joined member, only show it if explicitly targeted to this room
+        is_joined_member = author in joined_members and author != owner_id
+        if is_joined_member and d.get("target_room_id") != room_id:
+            continue
+            
         if author not in author_cache:
             a_ref = db_fs.collection('users').document(author).get()
             author_cache[author] = a_ref.to_dict() if a_ref.exists else {}
@@ -856,7 +883,7 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
             "image_urls": d.get("image_urls", []),
             "likes": d.get("likes", 0),
             "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value,
-            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None # ✨ ADD THIS LINE
+            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
         })
     return posts
 
@@ -931,3 +958,96 @@ def get_user_profile_media(username: str):
         "photos": photos,
         "videos": videos
     }
+
+@app.post("/rooms/invite")
+def send_room_invitation(payload: RoomInvitePayload):
+    owner = payload.username.strip().lower()
+    target = payload.target_user.strip().lower()
+    
+    # Verify the room exists under the owner
+    room_ref = db_fs.collection('users').document(owner).collection('rooms').document(payload.room_id)
+    room_snap = room_ref.get()
+    if not room_snap.exists:
+        raise HTTPException(status_code=404, detail="Target room configuration not found.")
+    
+    room_name = room_snap.to_dict().get("name", "Unnamed Room")
+    
+    # Check if an invitation is already pending
+    existing = db_fs.collection('room_invitations').where(
+        filter=firestore.FieldFilter("room_id", "==", payload.room_id)
+    ).where(
+        filter=firestore.FieldFilter("recipient", "==", target)
+    ).where(
+        filter=firestore.FieldFilter("status", "==", "pending")
+    ).get()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="An invitation to this room is already pending.")
+        
+    # Create the global notification invitation document
+    invite_id = str(uuid.uuid4())[:8]
+    db_fs.collection('room_invitations').document(invite_id).set({
+        "id": invite_id,
+        "room_id": payload.room_id,
+        "room_name": room_name,
+        "sender": owner,
+        "recipient": target,
+        "status": "pending",
+        "timestamp": int(time.time())
+    })
+    return {"status": "success", "message": "Room invitation sent successfully."}
+
+@app.get("/rooms/invitations/pending/{username}")
+def get_pending_room_invitations(username: str):
+    clean_user = username.strip().lower()
+    docs = db_fs.collection('room_invitations').where(
+        filter=firestore.FieldFilter("recipient", "==", clean_user)
+    ).where(
+        filter=firestore.FieldFilter("status", "==", "pending")
+    ).get()
+    
+    return [doc.to_dict() for doc in docs]
+
+@app.post("/rooms/invitations/handle")
+def handle_room_invitation(payload: HandleInvitePayload):
+    recipient = payload.username.strip().lower()
+    action = payload.action.strip().lower()
+    
+    invite_ref = db_fs.collection('room_invitations').document(payload.invitation_id)
+    invite_snap = invite_ref.get()
+    if not invite_snap.exists:
+        raise HTTPException(status_code=404, detail="Invitation not found.")
+        
+    invite_data = invite_snap.to_dict()
+    if invite_data.get("recipient") != recipient:
+        raise HTTPException(status_code=403, detail="Unauthorized action.")
+        
+    if action == "accept":
+        sender = invite_data.get("sender")
+        room_id = invite_data.get("room_id")
+        
+        # Add recipient to the room owner's document tracking system
+        room_ref = db_fs.collection('users').document(sender).collection('rooms').document(room_id)
+        room_snap = room_ref.get()
+        
+        if room_ref.get().exists:
+            room_data = room_snap.to_dict()
+            joined_members = room_data.get("joined_members", [])
+            if recipient not in joined_members:
+                joined_members.append(recipient)
+                room_ref.update({"joined_members": joined_members})
+                
+            # Mirror a shallow room link inside the recipient's space so it displays in "My Rooms"
+            db_fs.collection('users').document(recipient).collection('rooms').document(room_id).set({
+                "id": room_id,
+                "name": room_data.get("name"),
+                "owner": sender,
+                "is_shared_collaboration": True,
+                "created_at": int(time.time())
+            })
+            
+        invite_ref.update({"status": "accepted"})
+    else:
+        invite_ref.update({"status": "declined"})
+        
+    return {"status": "success"}
