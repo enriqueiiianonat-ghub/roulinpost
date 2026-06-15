@@ -107,25 +107,37 @@ async def process_and_upload_media(file: UploadFile) -> str:
             is_mp4_signature
         )
         
+        # ✨ FIX: Replaced invalid `.contains()` syntax with clean, native Python `in` evaluations
+        is_document = (
+            c_type.startswith("application/pdf") or
+            "msword" in c_type or
+            "officedocument" in c_type or
+            f_name.endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt'))
+        )
+        
         if is_video:
             unique_id = uuid.uuid4()
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
-
-            blob.metadata = {
-                "contentType": "video/mp4",
-                "contentDisposition": "inline"
-            }
-
-            blob.upload_from_string(
-                file_bytes,
-                content_type="video/mp4"
-            )
-
+            blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
+            blob.upload_from_string(file_bytes, content_type="video/mp4")
             blob.content_type = "video/mp4"
             blob.patch()
             blob.make_public()
+            return blob.public_url
 
+        elif is_document:
+            unique_id = uuid.uuid4()
+            ext = f_name.split('.')[-1] if '.' in f_name else 'dat'
+            blob_path = f"documents/{unique_id}.{ext}"
+            blob = bucket.blob(blob_path)
+            
+            determined_type = c_type if c_type else "application/octet-stream"
+            blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
+            blob.upload_from_string(file_bytes, content_type=determined_type)
+            blob.content_type = determined_type
+            blob.patch()
+            blob.make_public()
             return blob.public_url
 
         else:
@@ -389,7 +401,6 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
         comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
         comment_count = comments_ref.count().get()[0][0].value
                 
-        # Inside your post list dictionary loop constructors, make sure to return the raw timestamp string data:
         posts.append({
             "id": post_id,
             "username": author,
@@ -399,16 +410,22 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []), 
             "likes": d.get("likes", 0),
+            "room_only": d.get("room_only", False),
             "comment_count": comment_count,
-            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None # 
+            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None 
         })
+        
+    # Fix 3 Implementation: Exclude room_only updates since no specific room feed target is requested here
+    posts = [p for p in posts if not p.get("room_only", False)]
+        
     return posts
 
 @app.post("/posts")
 async def create_post(
     username: str = Form(...),
     message: Optional[str] = Form(None),
-    target_room_id: Optional[str] = Form(None), # Added parameter field
+    target_room_id: Optional[str] = Form(None), 
+    room_only: str = Form("false"), # Added form field parameter
     files: List[UploadFile] = File([])
 ):
     if len(files) > 12:
@@ -419,11 +436,16 @@ async def create_post(
     media_urls = [url for url in results if url]
             
     post_ref = db_fs.collection('posts').document()
+    
+    # Process room_only parameter string into a clean boolean
+    is_room_only = room_only.strip().lower() == "true"
+
     post_data = {
         'username': username,
         'message': message or "",
         'image_urls': media_urls, 
         'likes': 0,
+        'room_only': is_room_only, # Fix 3 Implementation
         'timestamp': firestore.SERVER_TIMESTAMP  
     }
     if target_room_id:
@@ -486,6 +508,7 @@ class ChatMessageSchema(BaseModel):
     sender: str
     recipient: str
     text: str
+    media_url: Optional[str] = None # Added media attachment field
 
 def get_conversation_id(user1: str, user2: str) -> str:
     sorted_users = sorted([user1.lower().strip(), user2.lower().strip()])
@@ -493,8 +516,8 @@ def get_conversation_id(user1: str, user2: str) -> str:
 
 @app.post("/chat/send")
 def send_direct_message(payload: ChatMessageSchema):
-    if not payload.text.strip():
-        raise HTTPException(status_code=400, detail="Message body cannot be blank.")
+    if not payload.text.strip() and not payload.media_url:
+        raise HTTPException(status_code=400, detail="Message body or media attachment required.")
         
     conv_id = get_conversation_id(payload.sender, payload.recipient)
     now_ts = int(time.time())
@@ -502,7 +525,7 @@ def send_direct_message(payload: ChatMessageSchema):
     chat_room_ref = db_fs.collection('chats').document(conv_id)
     chat_room_ref.set({
         "participants": [payload.sender, payload.recipient],
-        "last_message": payload.text,
+        "last_message": "[Media File]" if not payload.text.strip() else payload.text,
         "last_updated": now_ts
     }, merge=True)
     
@@ -511,8 +534,9 @@ def send_direct_message(payload: ChatMessageSchema):
         "sender": payload.sender,
         "recipient": payload.recipient,
         "text": payload.text,
+        "media_url": payload.media_url, # Persist media asset attachment path
         "timestamp": now_ts,
-        "read": False  #  Initialize as unread
+        "read": False
     })
     
     return {"status": "success", "message_id": message_ref.id}
@@ -597,6 +621,7 @@ def get_chat_history(conversation_id: str):
             "sender": d.get("sender"),
             "recipient": d.get("recipient"),
             "text": d.get("text"),
+            "media_url": d.get("media_url"), # Extracted media attachment parameter
             "timestamp": d.get("timestamp")
         })
     return messages
@@ -1051,3 +1076,56 @@ def handle_room_invitation(payload: HandleInvitePayload):
         invite_ref.update({"status": "declined"})
         
     return {"status": "success"}
+
+    # Clear the accidental space indentation on the lines below so the method maps perfectly to global scope!
+@app.post("/chat/upload-attachment")
+async def chat_upload_attachment(
+    username: str = Form(...),
+    file: UploadFile = File(...)
+):
+    try:
+        bucket = storage.bucket()
+        c_type = (file.content_type or "").lower()
+        f_name = (file.filename or "").lower()
+        
+        await file.seek(0)
+        file_bytes = await file.read()
+        
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="Empty attachment file bytes array received.")
+
+        # Structure an isolated storage directory location paths mapping
+        unique_id = uuid.uuid4()
+        ext = f_name.split('.')[-1] if '.' in f_name else 'dat'
+        
+        if c_type.startswith("video/") or ext in ['mp4', 'mov', 'avi', 'webm']:
+            folder = "videos"
+            determined_type = "video/mp4"
+            disposition = "inline"
+        elif ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'] or c_type.startswith("application/"):
+            folder = "documents"
+            determined_type = c_type if c_type else "application/octet-stream"
+            disposition = "attachment"
+        else:
+            folder = "posts"
+            determined_type = c_type if c_type else "image/jpeg"
+            disposition = "inline"
+
+        blob_path = f"{folder}/{unique_id}.{ext}"
+        blob = bucket.blob(blob_path)
+        
+        blob.metadata = {
+            "contentType": determined_type,
+            "contentDisposition": disposition
+        }
+        
+        blob.upload_from_string(file_bytes, content_type=determined_type)
+        blob.content_type = determined_type
+        blob.patch()
+        blob.make_public()
+        
+        return {"public_url": blob.public_url}
+        
+    except Exception as e:
+        print(f"🔥 Chat File Attachment Upload Failure: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Attachment processor engine failure: {str(e)}")
