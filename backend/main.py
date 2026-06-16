@@ -878,10 +878,14 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
     # Collect all users authorized to broadcast updates into this timeline
     query_profiles = list(set(profiles + joined_members + [owner_id]))
 
+    # Base query for authorized profiles
     query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
     
-    # ✨ FILTER LOGIC: Filter out posts unless they are tagged with this room or belong to a profile tracking rule
-    docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
+    # Order by timestamp descending
+    query = query.order_by("timestamp", direction=firestore.Query.DESCENDING)
+    
+    # Fetch a larger candidate batch to allow filtering before narrowing to page limits
+    docs = query.get()
     
     posts = []
     author_cache = {}
@@ -910,7 +914,11 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
             "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value,
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
         })
-    return posts
+        
+    # Apply precise pagination over the filtered, memory-resident post data subset
+    start_index = offset
+    end_index = offset + limit
+    return posts[start_index:end_index]
 
 class ReadReceiptPayload(BaseModel):
     conversation_id: str
