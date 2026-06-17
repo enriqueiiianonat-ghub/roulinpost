@@ -1072,69 +1072,86 @@ async def chat_upload_attachment(
         bucket = storage.bucket()
         c_type = (file.content_type or "").lower()
         f_name = (file.filename or "").lower()
-        
+
         await file.seek(0)
         file_bytes = await file.read()
-        
+
         if not file_bytes:
             raise HTTPException(status_code=400, detail="Empty attachment file bytes array received.")
 
         unique_id = uuid.uuid4()
         ext = f_name.split('.')[-1] if '.' in f_name else 'dat'
-        
+
         is_mp4_signature = len(file_bytes) > 12 and b"ftyp" in file_bytes[4:12]
         is_video = (
-            c_type.startswith("video/") or 
+            c_type.startswith("video/") or
             "video" in c_type or
             f_name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.3gp', '.webm')) or
             is_mp4_signature
         )
+        is_document = (
+            c_type.startswith("application/pdf") or
+            "msword" in c_type or
+            "officedocument" in c_type or
+            ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'] or
+            c_type.startswith("application/")
+        )
 
         if is_video:
-            folder = "videos"
-            determined_type = "video/mp4"
-            disposition = "inline"
-            # ✨ UNIVERSAL FILTER: Compresses direct chat attachment videos on the server layer
-            file_bytes = compress_video_heavy(file_bytes)
-            ext = "mp4" 
-        elif ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'] or c_type.startswith("application/"):
-            folder = "documents"
+            # ── Mirrors process_and_upload_media: compress → upload as video/mp4 ──
+            compressed_video_data = compress_video_heavy(file_bytes)
+            blob_path = f"videos/{unique_id}.mp4"
+            blob = bucket.blob(blob_path)
+            blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
+            blob.upload_from_string(compressed_video_data, content_type="video/mp4")
+            blob.content_type = "video/mp4"   # ← mirrors post pipeline
+            blob.patch()                        # ← mirrors post pipeline
+            blob.make_public()
+            return {"public_url": blob.public_url}
+
+        elif is_document:
+            # ── Mirrors process_and_upload_media: raw bytes, attachment disposition ──
             determined_type = c_type if c_type else "application/octet-stream"
-            disposition = "attachment"
+            blob_path = f"documents/{unique_id}.{ext}"
+            blob = bucket.blob(blob_path)
+            blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
+            blob.upload_from_string(file_bytes, content_type=determined_type)
+            blob.content_type = determined_type  # ← mirrors post pipeline
+            blob.patch()                          # ← mirrors post pipeline
+            blob.make_public()
+            return {"public_url": blob.public_url}
+
         else:
-            folder = "posts"
-            determined_type = "image/jpeg"
-            disposition = "inline"
+            # ── Mirrors process_and_upload_media: 640×640 thumbnail, JPEG quality 50 ──
             try:
-                # ✨ MIRRORS POST ENGINE: Truncates image bounds into a strict 640x640 frame and drops baseline visual quality variables to 50
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
-                
+
                 max_resolution = (640, 640)
                 img.thumbnail(max_resolution, Image.Resampling.LANCZOS)
-                
+
                 output = io.BytesIO()
                 img.save(output, format="JPEG", quality=50, optimize=True)
-                file_bytes = output.getvalue()
-                ext = "jpg"
-            except Exception as e:
-                print(f"⚠️ Direct chat attachment image optimization bypassed: {e}")
+                compressed_data = output.getvalue()
 
-        blob_path = f"{folder}/{unique_id}.{ext}"
-        blob = bucket.blob(blob_path)
-        
-        blob.metadata = {
-            "contentType": determined_type,
-            "contentDisposition": disposition
-        }
-        
-        blob.upload_from_string(file_bytes, content_type=determined_type)
-        blob.content_type = determined_type
-        blob.patch()
-        blob.make_public()
-        
-        return {"public_url": blob.public_url}
+                blob_path = f"posts/{unique_id}.jpg"
+                blob = bucket.blob(blob_path)
+                blob.metadata = {"contentType": "image/jpeg"}
+                blob.upload_from_string(compressed_data, content_type="image/jpeg")
+                blob.make_public()
+                return {"public_url": blob.public_url}
+
+            except Exception as img_err:
+                # ── Mirrors process_and_upload_media fallback: upload raw bytes ──
+                print(f"⚠️ Chat attachment image optimization bypassed: {img_err}")
+                blob_path = f"posts/{unique_id}.jpg"
+                blob = bucket.blob(blob_path)
+                blob.metadata = {"contentType": "image/jpeg"}
+                blob.upload_from_string(file_bytes, content_type="image/jpeg")
+                blob.make_public()
+                return {"public_url": blob.public_url}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Attachment processor engine failure: {str(e)}")
