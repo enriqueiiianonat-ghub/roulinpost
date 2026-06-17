@@ -1115,7 +1115,7 @@ async def chat_upload_attachment(
         )
 
         # ────────────────────────────────────────────────────────────────────
-        # VIDEO BRANCH
+        # VIDEO BRANCH (Saved to videos/ folder)
         # ────────────────────────────────────────────────────────────────────
         if is_video:
             compressed_video_data = compress_video_heavy(file_bytes)
@@ -1129,7 +1129,7 @@ async def chat_upload_attachment(
             return {"public_url": blob.public_url}
 
         # ────────────────────────────────────────────────────────────────────
-        # DOCUMENT BRANCH
+        # DOCUMENT BRANCH (Saved to documents/ folder)
         # ────────────────────────────────────────────────────────────────────
         elif is_document:
             determined_type = c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
@@ -1143,35 +1143,36 @@ async def chat_upload_attachment(
             return {"public_url": blob.public_url}
 
         # ────────────────────────────────────────────────────────────────────
-        # IMAGE BRANCH (Defensive fallback to match post compression targets)
+        # IMAGE BRANCH (Compressed AND saved to documents/ folder)
         # ────────────────────────────────────────────────────────────────────
         else:
             try:
-                # Run the exact 640x640 @ quality=50 pipeline
+                # 1. Open and automatically rotate image
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
 
+                # 2. Re-scale to match your post quality footprint
                 max_resolution = (640, 640)
                 img.thumbnail(max_resolution, Image.Resampling.LANCZOS)
 
+                # 3. Apply JPEG Quality 50 optimization (<50KB target)
                 output = io.BytesIO()
                 img.save(output, format="JPEG", quality=50, optimize=True)
                 compressed_data = output.getvalue()
 
-                blob_path = f"posts/{unique_id}.jpg"
+                # 4. Save into the separated 'documents/' folder as requested
+                blob_path = f"documents/{unique_id}.jpg"
                 blob = bucket.blob(blob_path)
-                blob.metadata = {"contentType": "image/jpeg"}
+                blob.metadata = {"contentType": "image/jpeg", "contentDisposition": "inline"}
                 blob.upload_from_string(compressed_data, content_type="image/jpeg")
                 blob.make_public()
                 return {"public_url": blob.public_url}
 
             except Exception as img_err:
-                # If PIL completely fails to parse bytes as an image, process it as a generic document
-                print(f"⚠️ Attachment image optimization failed completely: {img_err}. Routing to raw document backup.")
-                
-                # Dynamic fallback type assignment
+                # Fallback path if data stream cannot be decoded as a valid image file
+                print(f"⚠️ Attachment image optimization bypassed: {img_err}")
                 determined_type = c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
                 blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
                 blob = bucket.blob(blob_path)
