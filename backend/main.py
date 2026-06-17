@@ -1106,12 +1106,15 @@ async def chat_upload_attachment(
             determined_type = "image/jpeg"
             disposition = "inline"
             try:
-                # ✨ UNIVERSAL FILTER: Compresses chat images on the server layer
+                # ✨ MIRRORS POST ENGINE: Truncates image bounds into a strict 640x640 frame and drops baseline visual quality variables to 50
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
-                img.thumbnail((640, 640), Image.Resampling.LANCZOS)
+                
+                max_resolution = (640, 640)
+                img.thumbnail(max_resolution, Image.Resampling.LANCZOS)
+                
                 output = io.BytesIO()
                 img.save(output, format="JPEG", quality=50, optimize=True)
                 file_bytes = output.getvalue()
