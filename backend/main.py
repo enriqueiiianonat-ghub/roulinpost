@@ -11,7 +11,6 @@ import random
 import resend
 import asyncio 
 import json as py_json
-import ffmpeg  # ✨ FIX: Removed hidden non-breaking space formatting artifact causing the SyntaxError
 from pathlib import Path
 from PIL import Image, ImageOps
 import tempfile
@@ -36,14 +35,14 @@ app.add_middleware(
 )
 
 class RoomInvitePayload(BaseModel):
-    username: str        # Sender / Room Owner
-    room_id: str         # The Room ID being shared
-    target_user: str     # The user being invited
+    username: str        
+    room_id: str         
+    target_user: str     
 
 class HandleInvitePayload(BaseModel):
-    username: str        # The user handling the invite (recipient)
-    invitation_id: str   # The ID of the invitation document
-    action: str          # "accept" or "decline"
+    username: str        
+    invitation_id: str   
+    action: str          
 
 
 # --- FIREBASE INITIALIZATION BLOCK ---
@@ -86,6 +85,51 @@ class UserLogin(BaseModel):
     username: str
     password: str
 
+def compress_video_heavy(file_bytes: bytes) -> bytes:
+    """Forces aggressive H.264 video compression onto the input video bytes directly on the server."""
+    try:
+        in_fd, in_name = tempfile.mkstemp(suffix=".mp4")
+        out_fd, out_name = tempfile.mkstemp(suffix=".mp4")
+        
+        try:
+            with os.fdopen(in_fd, 'wb') as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+            
+            # Universal heavy compression engine settings:
+            # CRF 35 (Super tiny file footprint), Scale bounds to 360p, crush audio down to 24k mono
+            cmd = [
+                "ffmpeg", "-y", "-i", in_name,
+                "-vcodec", "libx264", 
+                "-crf", "35", 
+                "-preset", "ultrafast",
+                "-vf", "scale=w='if(gte(iw,ih),min(360,iw),-2)':h='if(lt(iw,ih),min(360,ih),-2)'",
+                "-acodec", "aac", 
+                "-b:a", "24k", 
+                "-ac", "1",
+                "-f", "mp4",
+                out_name
+            ]
+            
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            
+            with open(out_name, "rb") as f:
+                compressed_bytes = f.read()
+                
+            if len(compressed_bytes) > 0:
+                print(f"✅ Video universally compressed down to {len(compressed_bytes)} bytes")
+                return compressed_bytes
+        finally:
+            if os.path.exists(in_name):
+                os.unlink(in_name)
+            if os.path.exists(out_name):
+                os.unlink(out_name)
+                
+        return file_bytes
+    except Exception as e:
+        print(f"⚠️ Video compression pipeline skipped or missing server dependencies, uploading direct payload: {e}")
+        return file_bytes
+
 async def process_and_upload_media(file: UploadFile) -> str:
     try:
         bucket = storage.bucket()
@@ -96,7 +140,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
         file_bytes = await file.read()
         
         if not file_bytes or len(file_bytes) == 0:
-            print("⚠️ Upload Blocked: File byte array empty.")
             return ""
 
         is_mp4_signature = len(file_bytes) > 12 and b"ftyp" in file_bytes[4:12]
@@ -107,7 +150,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
             is_mp4_signature
         )
         
-        # ✨ FIX: Replaced invalid `.contains()` syntax with clean, native Python `in` evaluations
         is_document = (
             c_type.startswith("application/pdf") or
             "msword" in c_type or
@@ -116,11 +158,13 @@ async def process_and_upload_media(file: UploadFile) -> str:
         )
         
         if is_video:
+            # ✨ UNIVERSAL FILTER: Compresses video regardless of what platform uploaded it
+            compressed_video_data = compress_video_heavy(file_bytes)
             unique_id = uuid.uuid4()
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
-            blob.upload_from_string(file_bytes, content_type="video/mp4")
+            blob.upload_from_string(compressed_video_data, content_type="video/mp4")
             blob.content_type = "video/mp4"
             blob.patch()
             blob.make_public()
@@ -142,16 +186,17 @@ async def process_and_upload_media(file: UploadFile) -> str:
 
         else:
             try:
+                # ✨ UNIVERSAL FILTER: Compresses any image down to a 640x640 pixel frame with 50 quality
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
                     
-                max_resolution = (1080, 1080)
+                max_resolution = (640, 640)
                 img.thumbnail(max_resolution, Image.Resampling.LANCZOS)
                 
                 output = io.BytesIO()
-                img.save(output, format="JPEG", quality=80, optimize=True)
+                img.save(output, format="JPEG", quality=50, optimize=True)
                 compressed_data = output.getvalue()
                 
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
@@ -161,7 +206,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             except Exception as img_err:
-                print(f"⚠️ Image parsing failed: {img_err}")
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": "image/jpeg"}
@@ -170,7 +214,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 return blob.public_url
             
     except Exception as e:
-        print(f"🔥 Critical Pipeline Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
 
 def process_and_upload_avatar(file_bytes: bytes) -> str:
@@ -415,9 +458,7 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None 
         })
         
-    # Fix 3 Implementation: Exclude room_only updates since no specific room feed target is requested here
     posts = [p for p in posts if not p.get("room_only", False)]
-        
     return posts
 
 @app.post("/posts")
@@ -425,7 +466,7 @@ async def create_post(
     username: str = Form(...),
     message: Optional[str] = Form(None),
     target_room_id: Optional[str] = Form(None), 
-    room_only: str = Form("false"), # Added form field parameter
+    room_only: str = Form("false"), 
     files: List[UploadFile] = File([])
 ):
     if len(files) > 12:
@@ -436,8 +477,6 @@ async def create_post(
     media_urls = [url for url in results if url]
             
     post_ref = db_fs.collection('posts').document()
-    
-    # Process room_only parameter string into a clean boolean
     is_room_only = room_only.strip().lower() == "true"
 
     post_data = {
@@ -445,7 +484,7 @@ async def create_post(
         'message': message or "",
         'image_urls': media_urls, 
         'likes': 0,
-        'room_only': is_room_only, # Fix 3 Implementation
+        'room_only': is_room_only, 
         'timestamp': firestore.SERVER_TIMESTAMP  
     }
     if target_room_id:
@@ -508,7 +547,7 @@ class ChatMessageSchema(BaseModel):
     sender: str
     recipient: str
     text: str
-    media_url: Optional[str] = None # Added media attachment field
+    media_url: Optional[str] = None 
 
 def get_conversation_id(user1: str, user2: str) -> str:
     sorted_users = sorted([user1.lower().strip(), user2.lower().strip()])
@@ -534,14 +573,13 @@ def send_direct_message(payload: ChatMessageSchema):
         "sender": payload.sender,
         "recipient": payload.recipient,
         "text": payload.text,
-        "media_url": payload.media_url, # Persist media asset attachment path
+        "media_url": payload.media_url, 
         "timestamp": now_ts,
         "read": False
     })
     
     return {"status": "success", "message_id": message_ref.id}
 
-# ✨ NEW MODULE SYNC FIX: Resolves 404 polling requests for dynamic conversation inbox components
 @app.get("/chat/notifications")
 def get_incoming_unread_chat_notifications(recipient: str):
     clean_recipient = recipient.strip().lower()
@@ -557,11 +595,9 @@ def get_incoming_unread_chat_notifications(recipient: str):
             continue
         sender_label = sender_targets[0]
         
-        # Check for messages from the chat partner that are unread
         messages_ref = chat_doc.reference.collection('messages')
         unread_docs = messages_ref.where(filter=firestore.FieldFilter("sender", "==", sender_label)).where(filter=firestore.FieldFilter("read", "==", False)).get()
         
-        # Count them or set to 1 if any unread exists
         unread_summary_map[sender_label] = len(unread_docs)
         
     return unread_summary_map
@@ -621,7 +657,7 @@ def get_chat_history(conversation_id: str):
             "sender": d.get("sender"),
             "recipient": d.get("recipient"),
             "text": d.get("text"),
-            "media_url": d.get("media_url"), # Extracted media attachment parameter
+            "media_url": d.get("media_url"), 
             "timestamp": d.get("timestamp")
         })
     return messages
@@ -649,13 +685,11 @@ def delete_post(post_id: str, username: str):
 @app.get("/users/profile/{username}")
 def get_user_profile(username: str):
     clean_user = username.strip().lower()
-
     user_doc = db_fs.collection("users").document(clean_user).get()
     if not user_doc.exists:
         raise HTTPException(status_code=404, detail="User not found")
 
     user_data = user_doc.to_dict()
-
     post_count = (
         db_fs.collection("posts")
         .where(filter=firestore.FieldFilter("username", "==", clean_user))
@@ -789,7 +823,6 @@ def check_is_friend_status(current_user: str, target_user: str):
     is_friend = db_fs.collection('users').document(user_a).collection('friends').document(user_b).get().exists
     return {"is_friend": is_friend}
 
-# --- ROOMS CHANNELS LAYOUT ENGINE BLOCK ---
 class RoomCreatePayload(BaseModel):
     username: str
     room_name: str
@@ -824,10 +857,8 @@ def create_custom_room(payload: RoomCreatePayload):
 def list_user_rooms(username: str):
     user_id = username.strip().lower()
     rooms = db_fs.collection('users').document(user_id).collection('rooms').get()
-    
     user_snap = db_fs.collection('users').document(user_id).get()
     default_room_id = user_snap.to_dict().get("default_room_id", "") if user_snap.exists else ""
-    
     return [{**r.to_dict(), "is_default": (default_room_id != "" and r.id == default_room_id)} for r in rooms]
 
 @app.post("/rooms/add-profile")
@@ -857,16 +888,12 @@ def set_default_app_room(payload: RoomDefaultPayload):
 @app.get("/posts/room/{username}/{room_id}")
 def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset: int = 0):
     user_id = username.strip().lower()
-    
-    # Find the room configuration (check if user is owner, otherwise fetch from owner's collection)
     room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
     if not room_snap.exists:
         return []
         
     room_data = room_snap.to_dict()
-    owner_id = room_data.get("owner", user_id) # Falls back to user_id if they are the owner
-    
-    # Pull master room data directly from the owner's record
+    owner_id = room_data.get("owner", user_id) 
     master_room = db_fs.collection('users').document(owner_id).collection('rooms').document(room_id).get()
     if not master_room.exists:
         return []
@@ -874,17 +901,10 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
     master_data = master_room.to_dict()
     profiles = master_data.get("profiles", [])
     joined_members = master_data.get("joined_members", [])
-    
-    # Collect all users authorized to broadcast updates into this timeline
     query_profiles = list(set(profiles + joined_members + [owner_id]))
 
-    # Base query for authorized profiles
     query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
-    
-    # Order by timestamp descending
     query = query.order_by("timestamp", direction=firestore.Query.DESCENDING)
-    
-    # Fetch a larger candidate batch to allow filtering before narrowing to page limits
     docs = query.get()
     
     posts = []
@@ -893,7 +913,6 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
         d = doc.to_dict()
         author = d.get("username", "")
         
-        # If the post is from a joined member, only show it if explicitly targeted to this room
         is_joined_member = author in joined_members and author != owner_id
         if is_joined_member and d.get("target_room_id") != room_id:
             continue
@@ -915,25 +934,21 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
         })
         
-    # Apply precise pagination over the filtered, memory-resident post data subset
     start_index = offset
     end_index = offset + limit
     return posts[start_index:end_index]
 
 class ReadReceiptPayload(BaseModel):
     conversation_id: str
-    recipient: str  # Current user who is reading the messages
-    sender: str     # Chat partner whose messages are being marked read
+    recipient: str  
+    sender: str     
 
 @app.post("/chat/read")
 def mark_messages_as_read(payload: ReadReceiptPayload):
     chat_ref = db_fs.collection("chats").document(payload.conversation_id).collection("messages")
-    # Fetch all unread messages sent by the partner to the current user
     unread_messages = chat_ref.where(filter=firestore.FieldFilter("sender", "==", payload.sender.strip())).where(filter=firestore.FieldFilter("read", "==", False)).get()
-    
     for doc in unread_messages:
         doc.reference.update({"read": True})
-        
     return {"status": "success", "updated_count": len(unread_messages)}
 
 class RoomUpdatePayload(BaseModel):
@@ -947,7 +962,6 @@ def update_custom_room(payload: RoomUpdatePayload):
     user_id = payload.username.strip().lower()
     room_id = payload.room_id.strip()
     new_room_name = payload.new_name.strip()
-    
     if not new_room_name:
         raise HTTPException(status_code=400, detail="Room name cannot be blank.")
         
@@ -955,9 +969,7 @@ def update_custom_room(payload: RoomUpdatePayload):
     if not room_ref.get().exists:
         raise HTTPException(status_code=404, detail="Room not found.")
         
-    # Clean up and normalize the incoming profile lists data
     cleaned_profiles = [p.strip().lower() for p in payload.profiles]
-    
     room_ref.update({
         "name": new_room_name,
         "profiles": cleaned_profiles
@@ -967,57 +979,33 @@ def update_custom_room(payload: RoomUpdatePayload):
 @app.get("/users/profile/{username}/media")
 def get_user_profile_media(username: str):
     clean_user = username.strip().lower()
-    
-    # Query all posts created by this specific user
-    posts_query = db_fs.collection('posts').where(
-        filter=firestore.FieldFilter("username", "==", clean_user)
-    ).get()
-    
+    posts_query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "==", clean_user)).get()
     photos = []
     videos = []
-    
     for doc in posts_query:
         post_data = doc.to_dict()
         image_urls = post_data.get("image_urls", [])
-        
         for url in image_urls:
-            # Differentiate based on the file storage prefix or path signature
             if "videos/" in url or url.lower().endswith(('.mp4', '.mov', '.avi', '.webm')):
                 videos.append(url)
             else:
                 photos.append(url)
-                
-    return {
-        "photos": photos,
-        "videos": videos
-    }
+    return {"photos": photos, "videos": videos}
 
 @app.post("/rooms/invite")
 def send_room_invitation(payload: RoomInvitePayload):
     owner = payload.username.strip().lower()
     target = payload.target_user.strip().lower()
-    
-    # Verify the room exists under the owner
     room_ref = db_fs.collection('users').document(owner).collection('rooms').document(payload.room_id)
     room_snap = room_ref.get()
     if not room_snap.exists:
         raise HTTPException(status_code=404, detail="Target room configuration not found.")
     
     room_name = room_snap.to_dict().get("name", "Unnamed Room")
-    
-    # Check if an invitation is already pending
-    existing = db_fs.collection('room_invitations').where(
-        filter=firestore.FieldFilter("room_id", "==", payload.room_id)
-    ).where(
-        filter=firestore.FieldFilter("recipient", "==", target)
-    ).where(
-        filter=firestore.FieldFilter("status", "==", "pending")
-    ).get()
-    
+    existing = db_fs.collection('room_invitations').where(filter=firestore.FieldFilter("room_id", "==", payload.room_id)).where(filter=firestore.FieldFilter("recipient", "==", target)).where(filter=firestore.FieldFilter("status", "==", "pending")).get()
     if existing:
         raise HTTPException(status_code=400, detail="An invitation to this room is already pending.")
         
-    # Create the global notification invitation document
     invite_id = str(uuid.uuid4())[:8]
     db_fs.collection('room_invitations').document(invite_id).set({
         "id": invite_id,
@@ -1033,12 +1021,7 @@ def send_room_invitation(payload: RoomInvitePayload):
 @app.get("/rooms/invitations/pending/{username}")
 def get_pending_room_invitations(username: str):
     clean_user = username.strip().lower()
-    docs = db_fs.collection('room_invitations').where(
-        filter=firestore.FieldFilter("recipient", "==", clean_user)
-    ).where(
-        filter=firestore.FieldFilter("status", "==", "pending")
-    ).get()
-    
+    docs = db_fs.collection('room_invitations').where(filter=firestore.FieldFilter("recipient", "==", clean_user)).where(filter=firestore.FieldFilter("status", "==", "pending")).get()
     return [doc.to_dict() for doc in docs]
 
 @app.post("/rooms/invitations/handle")
@@ -1058,8 +1041,6 @@ def handle_room_invitation(payload: HandleInvitePayload):
     if action == "accept":
         sender = invite_data.get("sender")
         room_id = invite_data.get("room_id")
-        
-        # Add recipient to the room owner's document tracking system
         room_ref = db_fs.collection('users').document(sender).collection('rooms').document(room_id)
         room_snap = room_ref.get()
         
@@ -1070,7 +1051,6 @@ def handle_room_invitation(payload: HandleInvitePayload):
                 joined_members.append(recipient)
                 room_ref.update({"joined_members": joined_members})
                 
-            # Mirror a shallow room link inside the recipient's space so it displays in "My Rooms"
             db_fs.collection('users').document(recipient).collection('rooms').document(room_id).set({
                 "id": room_id,
                 "name": room_data.get("name"),
@@ -1078,14 +1058,11 @@ def handle_room_invitation(payload: HandleInvitePayload):
                 "is_shared_collaboration": True,
                 "created_at": int(time.time())
             })
-            
         invite_ref.update({"status": "accepted"})
     else:
         invite_ref.update({"status": "declined"})
-        
     return {"status": "success"}
 
-    # Clear the accidental space indentation on the lines below so the method maps perfectly to global scope!
 @app.post("/chat/upload-attachment")
 async def chat_upload_attachment(
     username: str = Form(...),
@@ -1102,22 +1079,45 @@ async def chat_upload_attachment(
         if not file_bytes:
             raise HTTPException(status_code=400, detail="Empty attachment file bytes array received.")
 
-        # Structure an isolated storage directory location paths mapping
         unique_id = uuid.uuid4()
         ext = f_name.split('.')[-1] if '.' in f_name else 'dat'
         
-        if c_type.startswith("video/") or ext in ['mp4', 'mov', 'avi', 'webm']:
+        is_mp4_signature = len(file_bytes) > 12 and b"ftyp" in file_bytes[4:12]
+        is_video = (
+            c_type.startswith("video/") or 
+            "video" in c_type or
+            f_name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.3gp', '.webm')) or
+            is_mp4_signature
+        )
+
+        if is_video:
             folder = "videos"
             determined_type = "video/mp4"
             disposition = "inline"
+            # ✨ UNIVERSAL FILTER: Compresses direct chat attachment videos on the server layer
+            file_bytes = compress_video_heavy(file_bytes)
+            ext = "mp4" 
         elif ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'] or c_type.startswith("application/"):
             folder = "documents"
             determined_type = c_type if c_type else "application/octet-stream"
             disposition = "attachment"
         else:
             folder = "posts"
-            determined_type = c_type if c_type else "image/jpeg"
+            determined_type = "image/jpeg"
             disposition = "inline"
+            try:
+                # ✨ UNIVERSAL FILTER: Compresses chat images on the server layer
+                img = Image.open(io.BytesIO(file_bytes))
+                img = ImageOps.exif_transpose(img)
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                img.thumbnail((640, 640), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                img.save(output, format="JPEG", quality=50, optimize=True)
+                file_bytes = output.getvalue()
+                ext = "jpg"
+            except Exception as e:
+                print(f"⚠️ Direct chat attachment image optimization bypassed: {e}")
 
         blob_path = f"{folder}/{unique_id}.{ext}"
         blob = bucket.blob(blob_path)
@@ -1133,7 +1133,5 @@ async def chat_upload_attachment(
         blob.make_public()
         
         return {"public_url": blob.public_url}
-        
     except Exception as e:
-        print(f"🔥 Chat File Attachment Upload Failure: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Attachment processor engine failure: {str(e)}")
