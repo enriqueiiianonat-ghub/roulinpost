@@ -19,6 +19,7 @@ import time
 
 from fastapi import APIRouter
 
+
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
@@ -1092,8 +1093,6 @@ async def chat_upload_attachment(
         )
 
         # ── Step 2: Detect image (by content-type OR extension) ──
-        # Must be checked BEFORE document to prevent misrouting when
-        # content-type is application/octet-stream but file is actually an image.
         IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'}
         is_image = (
             c_type.startswith("image/") or
@@ -1116,8 +1115,9 @@ async def chat_upload_attachment(
         )
 
         # ────────────────────────────────────────────────────────────────────
+        # VIDEO BRANCH
+        # ────────────────────────────────────────────────────────────────────
         if is_video:
-            # Mirrors process_and_upload_media: compress → upload as video/mp4
             compressed_video_data = compress_video_heavy(file_bytes)
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
@@ -1128,8 +1128,10 @@ async def chat_upload_attachment(
             blob.make_public()
             return {"public_url": blob.public_url}
 
+        # ────────────────────────────────────────────────────────────────────
+        # DOCUMENT BRANCH
+        # ────────────────────────────────────────────────────────────────────
         elif is_document:
-            # Mirrors process_and_upload_media: raw bytes, attachment disposition
             determined_type = c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
             blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
             blob = bucket.blob(blob_path)
@@ -1140,10 +1142,12 @@ async def chat_upload_attachment(
             blob.make_public()
             return {"public_url": blob.public_url}
 
+        # ────────────────────────────────────────────────────────────────────
+        # IMAGE BRANCH (Defensive fallback to match post compression targets)
+        # ────────────────────────────────────────────────────────────────────
         else:
-            # ── Image branch: mirrors process_and_upload_media exactly ──
-            # 640×640 thumbnail, JPEG quality 50 → target ~18–36 KB like posts
             try:
+                # Run the exact 640x640 @ quality=50 pipeline
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "P"):
@@ -1164,12 +1168,15 @@ async def chat_upload_attachment(
                 return {"public_url": blob.public_url}
 
             except Exception as img_err:
-                # Fallback: upload raw bytes (mirrors process_and_upload_media fallback)
-                print(f"⚠️ Chat attachment image optimization bypassed: {img_err}")
-                blob_path = f"posts/{unique_id}.jpg"
+                # If PIL completely fails to parse bytes as an image, process it as a generic document
+                print(f"⚠️ Attachment image optimization failed completely: {img_err}. Routing to raw document backup.")
+                
+                # Dynamic fallback type assignment
+                determined_type = c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
+                blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
                 blob = bucket.blob(blob_path)
-                blob.metadata = {"contentType": "image/jpeg"}
-                blob.upload_from_string(file_bytes, content_type="image/jpeg")
+                blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
+                blob.upload_from_string(file_bytes, content_type=determined_type)
                 blob.make_public()
                 return {"public_url": blob.public_url}
 
