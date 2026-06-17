@@ -684,10 +684,10 @@ def delete_post(post_id: str, username: str):
 
 @app.get("/users/profile/{username}")
 def get_user_profile(username: str):
-    clean_user = username.strip().lower()
+    clean_user = username.strip() # Removed .lower() to avoid profile missing errors
     user_doc = db_fs.collection("users").document(clean_user).get()
     if not user_doc.exists:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail=f"User [{clean_user}] profile map not found.")
 
     user_data = user_doc.to_dict()
     post_count = (
@@ -978,7 +978,7 @@ def update_custom_room(payload: RoomUpdatePayload):
 
 @app.get("/users/profile/{username}/media")
 def get_user_profile_media(username: str):
-    clean_user = username.strip().lower()
+    clean_user = username.strip() # Removed .lower() so images show up on walls correctly
     posts_query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "==", clean_user)).get()
     photos = []
     videos = []
