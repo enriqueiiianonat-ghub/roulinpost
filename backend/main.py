@@ -102,11 +102,11 @@ def compress_video_heavy(file_bytes: bytes) -> bytes:
             cmd = [
                 "ffmpeg", "-y", "-i", in_name,
                 "-vcodec", "libx264", 
-                "-crf", "35", 
-                "-preset", "ultrafast",
-                "-vf", "scale=w='if(gte(iw,ih),min(360,iw),-2)':h='if(lt(iw,ih),min(360,ih),-2)'",
+                "-crf", "24",              # ✨ Higher quality (Lower number = better quality)
+                "-preset", "medium",       # ✨ Better compression efficiency than ultrafast
+                "-vf", "scale=w='if(gte(iw,ih),min(720,iw),-2)':h='if(lt(iw,ih),min(720,ih),-2)'", # ✨ Upscaled to 720p bounds
                 "-acodec", "aac", 
-                "-b:a", "24k", 
+                "-b:a", "64k",             # ✨ Better audio bitrate
                 "-ac", "1",
                 "-f", "mp4",
                 out_name
@@ -159,17 +159,19 @@ async def process_and_upload_media(file: UploadFile) -> str:
         )
         
         if is_video:
-            # ✨ UNIVERSAL FILTER: Compresses video regardless of what platform uploaded it
-            compressed_video_data = compress_video_heavy(file_bytes)
+            # 🚀 FIX: Removed compress_video_heavy. Upload the mobile-optimized file directly!
             unique_id = uuid.uuid4()
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
-            blob.upload_from_string(compressed_video_data, content_type="video/mp4")
+            
+            # Directly upload file_bytes sent from your Flutter app
+            blob.upload_from_string(file_bytes, content_type="video/mp4")
             blob.content_type = "video/mp4"
             blob.patch()
             blob.make_public()
             return blob.public_url
+
 
         elif is_document:
             unique_id = uuid.uuid4()
