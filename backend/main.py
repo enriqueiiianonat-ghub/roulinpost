@@ -87,7 +87,10 @@ class UserLogin(BaseModel):
     password: str
 
 def compress_video_heavy(file_bytes: bytes) -> bytes:
-    """Forces aggressive H.264 video compression onto the input video bytes directly on the server."""
+    """Adaptive H.264 video compression pipeline that yields high quality 
+
+    and drops files larger than the source payload.
+    """
     try:
         in_fd, in_name = tempfile.mkstemp(suffix=".mp4")
         out_fd, out_name = tempfile.mkstemp(suffix=".mp4")
@@ -97,16 +100,18 @@ def compress_video_heavy(file_bytes: bytes) -> bytes:
                 tmp.write(file_bytes)
                 tmp.flush()
             
-            # Universal heavy compression engine settings:
-            # CRF 35 (Super tiny file footprint), Scale bounds to 360p, crush audio down to 24k mono
+            # ✨ OPTIMIZED PIPELINE:
+            # CRF 26: Strong mobile compression with sharp quality
+            # Preset Faster: Excellent compromise between encoding size reduction and CPU usage
+            # Scale: Upscaled to clear 720p resolution limits instead of pixelated 360p
             cmd = [
                 "ffmpeg", "-y", "-i", in_name,
                 "-vcodec", "libx264", 
-                "-crf", "24",              # ✨ Higher quality (Lower number = better quality)
-                "-preset", "medium",       # ✨ Better compression efficiency than ultrafast
-                "-vf", "scale=w='if(gte(iw,ih),min(720,iw),-2)':h='if(lt(iw,ih),min(720,ih),-2)'", # ✨ Upscaled to 720p bounds
+                "-crf", "26", 
+                "-preset", "faster",
+                "-vf", "scale=w='if(gte(iw,ih),min(720,iw),-2)':h='if(lt(iw,ih),min(720,ih),-2)'",
                 "-acodec", "aac", 
-                "-b:a", "64k",             # ✨ Better audio bitrate
+                "-b:a", "64k", 
                 "-ac", "1",
                 "-f", "mp4",
                 out_name
@@ -117,9 +122,14 @@ def compress_video_heavy(file_bytes: bytes) -> bytes:
             with open(out_name, "rb") as f:
                 compressed_bytes = f.read()
                 
-            if len(compressed_bytes) > 0:
-                print(f"✅ Video universally compressed down to {len(compressed_bytes)} bytes")
+            # 🛡️ SAFETY CHECK: If the server file grew or failed to shrink, discard it!
+            if 0 < len(compressed_bytes) < len(file_bytes):
+                print(f"✅ Video compressed down from {len(file_bytes)} to {len(compressed_bytes)} bytes")
                 return compressed_bytes
+            else:
+                print("⚠️ Server compression bloated the file size. Using original mobile upload instead.")
+                return file_bytes
+                
         finally:
             if os.path.exists(in_name):
                 os.unlink(in_name)
@@ -128,8 +138,9 @@ def compress_video_heavy(file_bytes: bytes) -> bytes:
                 
         return file_bytes
     except Exception as e:
-        print(f"⚠️ Video compression pipeline skipped or missing server dependencies, uploading direct payload: {e}")
+        print(f"⚠️ Video compression pipeline skipped or missing server dependencies: {e}")
         return file_bytes
+
 
 async def process_and_upload_media(file: UploadFile) -> str:
     try:
