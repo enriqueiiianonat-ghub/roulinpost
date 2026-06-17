@@ -1080,8 +1080,9 @@ async def chat_upload_attachment(
             raise HTTPException(status_code=400, detail="Empty attachment file bytes array received.")
 
         unique_id = uuid.uuid4()
-        ext = f_name.split('.')[-1] if '.' in f_name else 'dat'
+        ext = f_name.split('.')[-1] if '.' in f_name else ''
 
+        # ── Step 1: Detect video (by signature, content-type, or extension) ──
         is_mp4_signature = len(file_bytes) > 12 and b"ftyp" in file_bytes[4:12]
         is_video = (
             c_type.startswith("video/") or
@@ -1089,40 +1090,59 @@ async def chat_upload_attachment(
             f_name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.3gp', '.webm')) or
             is_mp4_signature
         )
-        is_document = (
-            c_type.startswith("application/pdf") or
-            "msword" in c_type or
-            "officedocument" in c_type or
-            ext in ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'] or
-            c_type.startswith("application/")
+
+        # ── Step 2: Detect image (by content-type OR extension) ──
+        # Must be checked BEFORE document to prevent misrouting when
+        # content-type is application/octet-stream but file is actually an image.
+        IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'}
+        is_image = (
+            c_type.startswith("image/") or
+            ext in IMAGE_EXTENSIONS
         )
 
+        # ── Step 3: Detect document (only true office/pdf types, never images) ──
+        DOCUMENT_EXTENSIONS = {'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'}
+        is_document = (
+            not is_image and
+            not is_video and
+            (
+                c_type.startswith("application/pdf") or
+                "msword" in c_type or
+                "officedocument" in c_type or
+                "spreadsheet" in c_type or
+                "presentation" in c_type or
+                ext in DOCUMENT_EXTENSIONS
+            )
+        )
+
+        # ────────────────────────────────────────────────────────────────────
         if is_video:
-            # ── Mirrors process_and_upload_media: compress → upload as video/mp4 ──
+            # Mirrors process_and_upload_media: compress → upload as video/mp4
             compressed_video_data = compress_video_heavy(file_bytes)
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
             blob.upload_from_string(compressed_video_data, content_type="video/mp4")
-            blob.content_type = "video/mp4"   # ← mirrors post pipeline
-            blob.patch()                        # ← mirrors post pipeline
+            blob.content_type = "video/mp4"
+            blob.patch()
             blob.make_public()
             return {"public_url": blob.public_url}
 
         elif is_document:
-            # ── Mirrors process_and_upload_media: raw bytes, attachment disposition ──
-            determined_type = c_type if c_type else "application/octet-stream"
-            blob_path = f"documents/{unique_id}.{ext}"
+            # Mirrors process_and_upload_media: raw bytes, attachment disposition
+            determined_type = c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
+            blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
             blob.upload_from_string(file_bytes, content_type=determined_type)
-            blob.content_type = determined_type  # ← mirrors post pipeline
-            blob.patch()                          # ← mirrors post pipeline
+            blob.content_type = determined_type
+            blob.patch()
             blob.make_public()
             return {"public_url": blob.public_url}
 
         else:
-            # ── Mirrors process_and_upload_media: 640×640 thumbnail, JPEG quality 50 ──
+            # ── Image branch: mirrors process_and_upload_media exactly ──
+            # 640×640 thumbnail, JPEG quality 50 → target ~18–36 KB like posts
             try:
                 img = Image.open(io.BytesIO(file_bytes))
                 img = ImageOps.exif_transpose(img)
@@ -1144,7 +1164,7 @@ async def chat_upload_attachment(
                 return {"public_url": blob.public_url}
 
             except Exception as img_err:
-                # ── Mirrors process_and_upload_media fallback: upload raw bytes ──
+                # Fallback: upload raw bytes (mirrors process_and_upload_media fallback)
                 print(f"⚠️ Chat attachment image optimization bypassed: {img_err}")
                 blob_path = f"posts/{unique_id}.jpg"
                 blob = bucket.blob(blob_path)
