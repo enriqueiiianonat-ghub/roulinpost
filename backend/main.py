@@ -131,6 +131,40 @@ def compress_video_heavy(file_bytes: bytes) -> bytes:
         print(f"⚠️ Video compression pipeline skipped or missing server dependencies, uploading direct payload: {e}")
         return file_bytes
 
+def extract_video_thumbnail(video_bytes: bytes) -> bytes | None:
+    """Extracts frame at 1 second from video bytes using ffmpeg. Returns JPEG bytes."""
+    try:
+        in_fd, in_name = tempfile.mkstemp(suffix=".mp4")
+        out_fd, out_name = tempfile.mkstemp(suffix=".jpg")
+        try:
+            with os.fdopen(in_fd, 'wb') as f:
+                f.write(video_bytes)
+            with os.fdopen(out_fd, 'wb'):
+                pass  # just close it
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", "1",           # seek to 1 second
+                "-i", in_name,
+                "-frames:v", "1",     # grab exactly one frame
+                "-vf", "scale=640:-2", # resize to 640px wide
+                "-q:v", "5",          # JPEG quality (1=best, 31=worst)
+                out_name
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+            with open(out_name, "rb") as f:
+                thumb_bytes = f.read()
+
+            return thumb_bytes if len(thumb_bytes) > 0 else None
+        finally:
+            if os.path.exists(in_name): os.unlink(in_name)
+            if os.path.exists(out_name): os.unlink(out_name)
+    except Exception as e:
+        print(f"⚠️ Thumbnail extraction failed: {e}")
+        return None
+
+
 async def process_and_upload_media(file: UploadFile) -> str:
     try:
         bucket = storage.bucket()
@@ -159,9 +193,10 @@ async def process_and_upload_media(file: UploadFile) -> str:
         )
         
         if is_video:
-            # ✨ UNIVERSAL FILTER: Compresses video regardless of what platform uploaded it
             compressed_video_data = compress_video_heavy(file_bytes)
             unique_id = uuid.uuid4()
+
+            # Upload video
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
@@ -169,7 +204,18 @@ async def process_and_upload_media(file: UploadFile) -> str:
             blob.content_type = "video/mp4"
             blob.patch()
             blob.make_public()
-            return blob.public_url
+            video_url = blob.public_url
+
+            # Extract and upload thumbnail
+            thumb_bytes = extract_video_thumbnail(compressed_video_data)
+            if thumb_bytes:
+                thumb_blob = bucket.blob(f"thumbnails/{unique_id}.jpg")
+                thumb_blob.upload_from_string(thumb_bytes, content_type="image/jpeg")
+                thumb_blob.make_public()
+                # Return as "videoUrl|||thumbnailUrl" — Flutter splits on |||
+                return f"{video_url}|||{thumb_blob.public_url}"
+
+            return video_url
 
         elif is_document:
             unique_id = uuid.uuid4()
@@ -1126,7 +1172,19 @@ async def chat_upload_attachment(
             blob.content_type = "video/mp4"
             blob.patch()
             blob.make_public()
-            return {"public_url": blob.public_url}
+            video_url = blob.public_url
+
+            thumb_bytes = extract_video_thumbnail(compressed_video_data)
+            thumb_url = ""
+            if thumb_bytes:
+                thumb_blob = bucket.blob(f"thumbnails/{unique_id}.jpg")
+                thumb_blob.upload_from_string(thumb_bytes, content_type="image/jpeg")
+                thumb_blob.make_public()
+                thumb_url = thumb_blob.public_url
+
+            return {"public_url": video_url, "thumbnail_url": thumb_url}
+
+
 
         # ────────────────────────────────────────────────────────────────────
         # DOCUMENT BRANCH (Saved to documents/ folder)
