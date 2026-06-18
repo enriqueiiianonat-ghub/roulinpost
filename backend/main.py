@@ -102,11 +102,11 @@ def compress_video_heavy(file_bytes: bytes) -> bytes:
             cmd = [
                 "ffmpeg", "-y", "-i", in_name,
                 "-vcodec", "libx264", 
-                "-crf", "30",              # ✨ Step up in quality (Lower CRF means sharper details)
-                "-preset", "superfast",    # ✨ One step higher efficiency than ultrafast (smaller file footprint)
-                "-vf", "scale=w='if(gte(iw,ih),min(480,iw),-2)':h='if(lt(iw,ih),min(480,iw),-2)'", # ✨ Bumped up to 480p
+                "-crf", "26",              # ✨ Higher quality (Lower CRF means much sharper details)
+                "-preset", "veryfast",     # ✨ Better frame compression logic than superfast
+                "-vf", "scale=w='if(gte(iw,ih),min(720,iw),-2)':h='if(lt(iw,ih),min(720,iw),-2)'", # ✨ Bumped up to HD 720p
                 "-acodec", "aac", 
-                "-b:a", "48k",             # ✨ Clearer mobile voice audio track
+                "-b:a", "64k",             # ✨ Crisp, clear mobile audio track
                 "-ac", "1",
                 "-f", "mp4",
                 out_name
