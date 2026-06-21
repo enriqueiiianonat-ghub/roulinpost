@@ -17,7 +17,12 @@ import tempfile
 import subprocess
 import time
 
-from fastapi import APIRouter
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Request, Response, APIRouter
+import hashlib
+
+def compute_etag(data) -> str:
+    raw = py_json.dumps(data, sort_keys=True, default=str).encode('utf-8')
+    return 'W/"' + hashlib.md5(raw).hexdigest() + '"'
 
 
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
@@ -33,6 +38,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["ETag"],   # ✨ NEW — without this, web can't read the ETag header at all
 )
 
 class RoomInvitePayload(BaseModel):
@@ -416,7 +422,7 @@ def delete_user_account(username: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/posts")
-def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
+def get_posts(request: Request, response: Response, limit: int = 10, offset: int = 0, username: Optional[str] = None):
     query = db_fs.collection('posts')
     if username:
         query = query.where(filter=firestore.FieldFilter("username", "==", username))
@@ -460,6 +466,15 @@ def get_posts(limit: int = 10, offset: int = 0, username: Optional[str] = None):
         })
         
     posts = [p for p in posts if not p.get("room_only", False)]
+
+    # ✨ NEW — ETag check
+    etag = compute_etag(posts)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
     return posts
 
 @app.post("/posts")
@@ -606,6 +621,69 @@ def get_incoming_unread_chat_notifications(recipient: str):
 class CommentModel(BaseModel):
     username: str
     text: str
+
+
+@app.get("/sync/{username}")
+def get_sync_status(username: str):
+    """
+    Lightweight polling endpoint. Returns only counts/badges needed to drive
+    the bell icon and chat badges — never full post/comment bodies.
+    Replaces 3+ separate polling calls (chat/notifications, rooms/invitations/pending,
+    posts + per-post comment counts) with a single round trip.
+    """
+    clean_user = username.strip().lower()
+
+    # 1. Chat unread badges (same logic as /chat/notifications, just inlined)
+    chat_badges = {}
+    chats_query = db_fs.collection('chats').where(
+        filter=firestore.FieldFilter("participants", "array_contains", clean_user)
+    ).get()
+
+    for chat_doc in chats_query:
+        participants = chat_doc.to_dict().get("participants", [])
+        sender_targets = [p for p in participants if p.lower().strip() != clean_user]
+        if not sender_targets:
+            continue
+        sender_label = sender_targets[0]
+
+        messages_ref = chat_doc.reference.collection('messages')
+        unread_docs = messages_ref.where(
+            filter=firestore.FieldFilter("sender", "==", sender_label)
+        ).where(
+            filter=firestore.FieldFilter("read", "==", False)
+        ).get()
+
+        if len(unread_docs) > 0:
+            chat_badges[sender_label] = len(unread_docs)
+
+    # 2. Pending room invitations — just the count, the modal fetches the full list on-demand
+    invite_docs = db_fs.collection('room_invitations').where(
+        filter=firestore.FieldFilter("recipient", "==", clean_user)
+    ).where(
+        filter=firestore.FieldFilter("status", "==", "pending")
+    ).get()
+    pending_invites_count = len(invite_docs)
+
+    # 3. Unread comments on my posts — count only, never the comment text itself
+    my_posts_query = db_fs.collection('posts').where(
+        filter=firestore.FieldFilter("username", "==", clean_user)
+    ).get()
+
+    unread_comment_count = 0
+    for post_doc in my_posts_query:
+        comment_docs = post_doc.reference.collection('comments').get()
+        unread_comment_count += sum(
+            1 for c in comment_docs
+            if (c.to_dict().get("username") or "").strip().lower() != clean_user
+        )
+
+    return {
+        "chat_badges": chat_badges,
+        "pending_room_invites": pending_invites_count,
+        "unread_comment_count": unread_comment_count,
+    }
+
+
 
 @app.get("/posts/{post_id}/comments")
 def get_comments(post_id: str):
@@ -887,7 +965,7 @@ def set_default_app_room(payload: RoomDefaultPayload):
     return {"status": "success"}
 
 @app.get("/posts/room/{username}/{room_id}")
-def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset: int = 0):
+def get_room_filtered_posts(request: Request, response: Response, username: str, room_id: str, limit: int = 10, offset: int = 0):
     user_id = username.strip().lower()
     room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
     if not room_snap.exists:
@@ -937,7 +1015,18 @@ def get_room_filtered_posts(username: str, room_id: str, limit: int = 10, offset
         
     start_index = offset
     end_index = offset + limit
-    return posts[start_index:end_index]
+    paged_posts = posts[start_index:end_index]
+
+    etag = compute_etag(paged_posts)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
+    return paged_posts
+
+
 
 class ReadReceiptPayload(BaseModel):
     conversation_id: str
