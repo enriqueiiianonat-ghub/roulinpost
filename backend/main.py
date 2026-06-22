@@ -25,6 +25,39 @@ def compute_etag(data) -> str:
     return 'W/"' + hashlib.md5(raw).hexdigest() + '"'
 
 
+def delete_storage_blob_from_url(url: str):
+    """
+    Reliably deletes a Firebase Storage blob given its PUBLIC url
+    (the kind produced by blob.make_public()), regardless of which
+    folder it lives in (posts/, videos/, documents/, avatars/).
+
+    Old logic used to do url.split("/")[-1] + string replaces that were
+    written for legacy %2F-encoded download URLs — that pattern doesn't
+    match make_public() URLs at all, so blob.exists() was always False
+    and files were silently never removed from Storage.
+    """
+    if not url:
+        return
+    try:
+        bucket = storage.bucket()
+        marker = f"/{BUCKET_NAME}/"
+        if marker in url:
+            # e.g. https://storage.googleapis.com/<bucket>/posts/uuid.jpg
+            blob_path = url.split(marker, 1)[1].split("?")[0]
+        else:
+            # Fallback for legacy encoded firebasestorage.app links
+            blob_path = url.split("/o/")[-1].split("?")[0]
+            blob_path = blob_path.replace("%2F", "/").replace("%2f", "/")
+
+        blob = bucket.blob(blob_path)
+        if blob.exists():
+            blob.delete()
+        else:
+            print(f"⚠️ Storage cleanup: blob not found for path '{blob_path}' (url: {url})")
+    except Exception as e:
+        print(f"⚠️ Storage cleanup failed for url {url}: {e}")
+
+
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
 
 app = FastAPI(title="EZGEE Social API")
@@ -366,6 +399,29 @@ async def update_profile(
         user_data['email'] = new_email
         if new_password:
             user_data['password'] = new_password
+
+        # ✨ FIX: Re-tag every post authored under the OLD username to the
+        # NEW username BEFORE the old user doc is deleted. Without this,
+        # the posts still carry "username": old_name forever — so
+        # /posts?username=new_name finds nothing (posts "disappear"),
+        # and the author-avatar lookup in get_posts() fails too, since it
+        # looks up users/{old_name}, which no longer exists.
+        old_posts = db_fs.collection('posts').where(
+            filter=firestore.FieldFilter("username", "==", padding_current)
+        ).get()
+
+        batch = db_fs.batch()
+        batch_count = 0
+        for p_doc in old_posts:
+            batch.update(p_doc.reference, {"username": clean_new})
+            batch_count += 1
+            if batch_count >= 450:  # stay safely under Firestore's 500-write batch limit
+                batch.commit()
+                batch = db_fs.batch()
+                batch_count = 0
+        if batch_count > 0:
+            batch.commit()
+
         new_ref.set(user_data)
         user_ref.delete()
         return {
@@ -400,24 +456,22 @@ def delete_user_account(username: str):
     
     avatar_url = user_data.get("profile_url", "")
     if avatar_url:
-        try:
-            file_name = avatar_url.split("/")[-1].split("?")[0].replace("avatars%", "avatars/")
-            bucket.blob(file_name).delete()
-        except:
-            pass
+        delete_storage_blob_from_url(avatar_url)
 
     try:
         user_posts_query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "==", clean_username)).get()
         for doc in user_posts_query:
             for url in doc.to_dict().get("image_urls", []):
-                try:
-                    file_name = url.split("/")[-1].split("?")[0].replace("posts%", "posts/").replace("videos%", "videos/")
-                    bucket.blob(file_name).delete()
-                except:
-                    pass
+                delete_storage_blob_from_url(url)
+
+            # Purge each post's comments subcollection too
+            comment_docs = doc.reference.collection('comments').get()
+            for c_doc in comment_docs:
+                c_doc.reference.delete()
+
             db_fs.collection('posts').document(doc.id).delete()
         user_ref.delete()
-        return {"message": "Account, posts, and files deleted successfully."}
+        return {"message": "Account, posts, comments, and files deleted successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -532,14 +586,9 @@ async def update_post(
     if len(retained_urls) + len(files) > 12:
         raise HTTPException(status_code=400, detail="Total attachments cannot exceed 12 items.")
 
-    bucket = storage.bucket()
     for old_url in old_post.get("image_urls", []):
         if old_url not in retained_urls:
-            try:
-                file_name = old_url.split("/")[-1].split("?")[0].replace("posts%", "posts/").replace("videos%", "videos/")
-                bucket.blob(file_name).delete()
-            except:
-                pass
+            delete_storage_blob_from_url(old_url)
 
     tasks = [process_and_upload_media(f) for f in files]
     results = await asyncio.gather(*tasks)
@@ -749,17 +798,29 @@ def delete_post(post_id: str, username: str):
         raise HTTPException(status_code=404, detail="Post not found")
     if snap.to_dict().get("username") != username:
         raise HTTPException(status_code=403, detail="Unauthorized execution")
-        
-    bucket = storage.bucket()
-    for url in snap.to_dict().get("image_urls", []):
-        try:
-            file_name = url.split("/")[-1].split("?")[0].replace("posts%", "posts/").replace("videos%", "videos/")
-            bucket.blob(file_name).delete()
-        except:
-            pass
-            
+
+    post_data = snap.to_dict()
+
+    # 1. Purge every attached media file (images/videos) from Storage
+    for url in post_data.get("image_urls", []):
+        delete_storage_blob_from_url(url)
+
+    # 2. Purge the post's comments subcollection — Firestore does NOT
+    #    cascade-delete subcollections automatically, so without this
+    #    every comment ever made on this post stays orphaned forever.
+    comments_ref = post_ref.collection('comments')
+    comment_docs = comments_ref.get()
+    for c_doc in comment_docs:
+        c_doc.reference.delete()
+
+    # 3. Finally, delete the post document itself
     post_ref.delete()
-    return {"message": "Deleted"}
+
+    return {
+        "message": "Deleted",
+        "media_files_removed": len(post_data.get("image_urls", [])),
+        "comments_removed": len(comment_docs),
+    }
 
 @app.get("/users/profile/{username}")
 def get_user_profile(username: str):
