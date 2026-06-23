@@ -278,12 +278,34 @@ def process_and_upload_avatar(file_bytes: bytes) -> str:
 async def register(user: UserRegister):
     try:
         clean_username = user.username.strip().lower()
+
+        # ✨ FIX: Block registration if username is already a confirmed account.
         user_ref = db_fs.collection('users').document(clean_username)
         if user_ref.get().exists:
-            raise HTTPException(status_code=400, detail="Username is already taken.")
+            raise HTTPException(status_code=400, detail="User Name Already Exist")
 
         pending_ref = db_fs.collection('unverified_users').document(clean_username)
-        if pending_ref.get().exists:
+        pending_snap = pending_ref.get()
+        if pending_snap.exists:
+            pending_data = pending_snap.to_dict()
+            otp_created_at = pending_data.get("created_at")
+
+            # ✨ NEW: If a previous OTP request for this exact username is still
+            # within its valid window (10 minutes), block re-registration too —
+            # someone else may be mid-verification for this same username.
+            # Only allow overwrite if that pending request has gone stale/expired.
+            is_still_valid = False
+            if otp_created_at is not None:
+                try:
+                    age_seconds = time.time() - otp_created_at.timestamp()
+                    is_still_valid = age_seconds < 600  # 10 minute OTP validity window
+                except Exception:
+                    is_still_valid = False
+
+            if is_still_valid:
+                raise HTTPException(status_code=400, detail="User Name Already Exist")
+
+            # Stale/expired pending registration — safe to clear and let this request proceed
             pending_ref.delete()
 
         otp_code = f"{random.randint(100000, 999999)}"
@@ -782,6 +804,7 @@ def get_chat_history(conversation_id: str):
     for doc in docs:
         d = doc.to_dict()
         messages.append({
+            "id": doc.id,  # ✨ NEW: needed so the client can target a delete
             "sender": d.get("sender"),
             "recipient": d.get("recipient"),
             "text": d.get("text"),
@@ -789,6 +812,95 @@ def get_chat_history(conversation_id: str):
             "timestamp": d.get("timestamp")
         })
     return messages
+
+@app.get("/chat/conversations/{username}")
+def get_chat_conversations(username: str):
+    """
+    Returns EVERY conversation this user has ever had — read or unread —
+    each with the partner's current avatar and last message preview.
+    This replaces the old approach of deriving the chat list from
+    /sync's unread-only badges, which is why names used to vanish the
+    moment you'd read all of someone's messages.
+    """
+    clean_user = username.strip().lower()
+    chats_query = db_fs.collection('chats').where(
+        filter=firestore.FieldFilter("participants", "array_contains", clean_user)
+    ).get()
+
+    conversations = []
+    for chat_doc in chats_query:
+        chat_data = chat_doc.to_dict()
+        participants = chat_data.get("participants", [])
+        partner_candidates = [p for p in participants if p.lower().strip() != clean_user]
+        if not partner_candidates:
+            continue
+        partner = partner_candidates[0]
+
+        messages_ref = chat_doc.reference.collection('messages')
+        unread_docs = messages_ref.where(
+            filter=firestore.FieldFilter("sender", "==", partner)
+        ).where(
+            filter=firestore.FieldFilter("read", "==", False)
+        ).get()
+
+        partner_snap = db_fs.collection('users').document(partner).get()
+        partner_avatar = partner_snap.to_dict().get("profile_url", "") if partner_snap.exists else ""
+
+        conversations.append({
+            "conversation_id": chat_doc.id,
+            "username": partner,
+            "profile_url": partner_avatar,
+            "last_message": chat_data.get("last_message", ""),
+            "last_updated": chat_data.get("last_updated", 0),
+            "unread_count": len(unread_docs),
+        })
+
+    conversations.sort(key=lambda c: c.get("last_updated", 0), reverse=True)
+    return conversations
+
+
+@app.delete("/chat/conversation/{conversation_id}")
+def delete_conversation(conversation_id: str, username: str):
+    """Deletes an entire conversation (all messages + the chat doc itself).
+    Either participant of a 1-on-1 DM is allowed to clear it."""
+    clean_user = username.strip().lower()
+    chat_ref = db_fs.collection('chats').document(conversation_id)
+    chat_snap = chat_ref.get()
+    if not chat_snap.exists:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    participants = [p.lower().strip() for p in chat_snap.to_dict().get("participants", [])]
+    if clean_user not in participants:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    messages = chat_ref.collection('messages').get()
+    for m in messages:
+        m.reference.delete()
+    chat_ref.delete()
+
+    return {"status": "success", "message": "Conversation deleted"}
+
+
+@app.delete("/chat/message/{conversation_id}/{message_id}")
+def delete_chat_message(conversation_id: str, message_id: str, username: str):
+    """Deletes a single message. Only the original sender may delete it."""
+    clean_user = username.strip().lower()
+    msg_ref = (
+        db_fs.collection('chats')
+        .document(conversation_id)
+        .collection('messages')
+        .document(message_id)
+    )
+    msg_snap = msg_ref.get()
+    if not msg_snap.exists:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if (msg_snap.to_dict().get("sender") or "").lower().strip() != clean_user:
+        raise HTTPException(status_code=403, detail="Only the sender can delete this message")
+
+    msg_ref.delete()
+    return {"status": "success", "message": "Message deleted"}
+
 
 @app.delete("/posts/{post_id}")
 def delete_post(post_id: str, username: str):
