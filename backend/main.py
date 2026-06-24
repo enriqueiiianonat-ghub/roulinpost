@@ -47,6 +47,17 @@ def detect_image_signature(file_bytes: bytes) -> bool:
     return False
 
 
+SUPPORTED_IMAGE_TYPES_MSG = "JPG, JPEG, PNG, GIF, WEBP, BMP"
+SUPPORTED_VIDEO_TYPES_MSG = "MP4, MOV, AVI, MKV, 3GP, WEBM"
+SUPPORTED_DOCUMENT_TYPES_MSG = "PDF, DOC, DOCX, XLS, XLSX, PPT, PPTX, TXT"
+FILE_NOT_RECOGNIZED_MSG = (
+    "File not recognized. Supported file types — "
+    f"Images: {SUPPORTED_IMAGE_TYPES_MSG}; "
+    f"Videos: {SUPPORTED_VIDEO_TYPES_MSG}; "
+    f"Documents: {SUPPORTED_DOCUMENT_TYPES_MSG}."
+)
+
+
 def delete_storage_blob_from_url(url: str):
 
     
@@ -342,7 +353,6 @@ async def process_and_upload_media(file: UploadFile) -> str:
         )
         
         if is_video:
-            # ✨ UNIVERSAL FILTER: Compresses video regardless of what platform uploaded it
             compressed_video_data = compress_video_heavy(file_bytes)
             unique_id = uuid.uuid4()
             blob_path = f"videos/{unique_id}.mp4"
@@ -369,9 +379,15 @@ async def process_and_upload_media(file: UploadFile) -> str:
             return blob.public_url
 
         else:
+            # ✨ FIX: if the bytes can't actually be decoded as an image
+            # (e.g. HEIC/HEIF straight from an iPhone — standard Pillow
+            # can't read it without an extra codec), the old code silently
+            # uploaded the raw, undecoded bytes mislabeled as image/jpeg.
+            # That's exactly the broken/black-photo bug. Now we reject
+            # clearly instead of pretending it's a valid JPEG.
             try:
-                # ✨ UNIVERSAL FILTER: Compresses any image down to a 640x640 pixel frame with 50 quality
                 img = Image.open(io.BytesIO(file_bytes))
+                img.load()  # forces full decode now, not lazily later
                 img = ImageOps.exif_transpose(img)
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
@@ -390,13 +406,11 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob.make_public()
                 return blob.public_url
             except Exception as img_err:
-                blob_path = f"posts/{uuid.uuid4()}.jpg"
-                blob = bucket.blob(blob_path)
-                blob.metadata = {"contentType": "image/jpeg"}
-                blob.upload_from_string(file_bytes, content_type="image/jpeg")
-                blob.make_public()
-                return blob.public_url
+                print(f"⚠️ Unrecognized file format rejected: {img_err}")
+                raise HTTPException(status_code=415, detail=FILE_NOT_RECOGNIZED_MSG)
             
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal media handler crash: {str(e)}")
 
@@ -521,6 +535,48 @@ def login(user: UserLogin):
         "country": u_data.get("country", ""),  
         "city": u_data.get("city", "")         
     }
+
+class ForgotPasswordRequest(BaseModel):
+    username: str
+
+@app.post("/auth/forgot-password")
+def forgot_password(payload: ForgotPasswordRequest):
+    clean_user = payload.username.strip().lower()
+    user_ref = db_fs.collection('users').document(clean_user)
+    snap = user_ref.get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="No account found with that username.")
+
+    user_data = snap.to_dict()
+    email = user_data.get("email")
+    password = user_data.get("password")
+    if not email:
+        raise HTTPException(status_code=400, detail="No email on file for this account.")
+
+    email_html = f"""
+    <div style="font-family: Arial, sans-serif; padding: 20px;">
+        <h2>ROULIN POST — Password Recovery</h2>
+        <p>Hi @{clean_user},</p>
+        <p>You (or someone using your username) requested your account password. Here it is:</p>
+        <div style="font-size: 22px; font-weight: bold; padding: 16px; background: #f2f2f2; text-align: center; letter-spacing: 2px;">
+            {password}
+        </div>
+        <p>For your security, consider changing it after logging in if you suspect anyone else has access to this email inbox.</p>
+        <p>If you didn't request this, please secure your email account — someone else may be trying to access your Roulin Post profile.</p>
+    </div>
+    """
+    try:
+        resend.Emails.send({
+            "from": "no-reply@roulinpost.com",
+            "to": email,
+            "subject": "ROULIN POST - Your Account Password",
+            "html": email_html,
+        })
+    except Exception as email_error:
+        raise HTTPException(status_code=500, detail=f"Failed to send recovery email: {str(email_error)}")
+
+    return {"message": "Your password has been sent to your registered email."}
+
 
 @app.put("/auth/profile/{current_username}")
 async def update_profile(
@@ -1282,6 +1338,8 @@ def create_custom_room(payload: RoomCreatePayload):
         "id": room_id,
         "name": room_name_clean,
         "profiles": [],
+        "joined_members": [],  # ✨ NEW: explicit, so Edit Room can show it even on day one
+        "owner": user_id,      # ✨ NEW: explicit owner tag for permission checks
         "created_at": int(time.time())
     })
     return {"status": "success", "room_id": room_id}
@@ -1410,6 +1468,7 @@ class RoomUpdatePayload(BaseModel):
     room_id: str
     new_name: str
     profiles: List[str]
+    joined_members: Optional[List[str]] = None  # ✨ NEW
 
 @app.put("/rooms/update")
 def update_custom_room(payload: RoomUpdatePayload):
@@ -1420,15 +1479,66 @@ def update_custom_room(payload: RoomUpdatePayload):
         raise HTTPException(status_code=400, detail="Room name cannot be blank.")
         
     room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
-    if not room_ref.get().exists:
+    room_snap = room_ref.get()
+    if not room_snap.exists:
         raise HTTPException(status_code=404, detail="Room not found.")
-        
+
+    # ✨ NEW: only the real owner may edit. A joined member's local copy
+    # is tagged is_shared_collaboration=True and is never the master doc.
+    existing_data = room_snap.to_dict()
+    if existing_data.get("is_shared_collaboration") is True:
+        raise HTTPException(status_code=403, detail="Only the room owner can edit this room.")
+
     cleaned_profiles = [p.strip().lower() for p in payload.profiles]
-    room_ref.update({
+    update_payload = {
         "name": new_room_name,
-        "profiles": cleaned_profiles
-    })
+        "profiles": cleaned_profiles,
+    }
+
+    if payload.joined_members is not None:
+        cleaned_members = [m.strip().lower() for m in payload.joined_members]
+        update_payload["joined_members"] = cleaned_members
+
+        # ✨ NEW: if the owner removed a member here, also delete that
+        # member's stale local copy so it stops appearing in their
+        # own "My Rooms" list.
+        old_members = set(existing_data.get("joined_members", []))
+        removed_members = old_members - set(cleaned_members)
+        for removed in removed_members:
+            stale_ref = db_fs.collection('users').document(removed).collection('rooms').document(room_id)
+            if stale_ref.get().exists:
+                stale_ref.delete()
+
+    room_ref.update(update_payload)
     return {"status": "success", "message": "Room updated successfully."}
+
+@app.delete("/rooms/delete")
+def delete_room(username: str, room_id: str):
+    """Deletes a room entirely. Only the actual owner may do this."""
+    user_id = username.strip().lower()
+    room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
+    room_snap = room_ref.get()
+    if not room_snap.exists:
+        raise HTTPException(status_code=404, detail="Room not found.")
+
+    room_data = room_snap.to_dict()
+    if room_data.get("is_shared_collaboration") is True:
+        raise HTTPException(status_code=403, detail="Only the room owner can delete this room.")
+
+    for member in room_data.get("joined_members", []):
+        member_room_ref = db_fs.collection('users').document(member).collection('rooms').document(room_id)
+        if member_room_ref.get().exists:
+            member_room_ref.delete()
+
+    pending_invites = db_fs.collection('room_invitations').where(
+        filter=firestore.FieldFilter("room_id", "==", room_id)
+    ).get()
+    for inv in pending_invites:
+        inv.reference.delete()
+
+    room_ref.delete()
+    return {"status": "success", "message": "Room deleted successfully."}
+
 
 @app.get("/users/profile/{username}/media")
 def get_user_profile_media(username: str):
