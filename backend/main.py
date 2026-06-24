@@ -25,6 +25,28 @@ def compute_etag(data) -> str:
     return 'W/"' + hashlib.md5(raw).hexdigest() + '"'
 
 
+def detect_image_signature(file_bytes: bytes) -> bool:
+    """
+    True byte-level sniffing for the most common image formats. This is
+    the authoritative check — it can never be fooled by a wrong filename
+    extension or a wrong Content-Type header, unlike string-based checks.
+    Used as a guard so a photo can NEVER be misclassified as a video,
+    even if its filename happens to end in .mp4 (the root cause of the
+    "photo renders as a broken black video" bug on desktop web).
+    """
+    if len(file_bytes) < 12:
+        return False
+    if file_bytes[0:3] == b"\xff\xd8\xff":          # JPEG
+        return True
+    if file_bytes[0:8] == b"\x89PNG\r\n\x1a\n":      # PNG
+        return True
+    if file_bytes[0:6] in (b"GIF87a", b"GIF89a"):    # GIF
+        return True
+    if file_bytes[0:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":  # WEBP
+        return True
+    return False
+
+
 def delete_storage_blob_from_url(url: str):
 
     
@@ -1515,17 +1537,25 @@ async def chat_upload_attachment(
         ext = f_name.split('.')[-1] if '.' in f_name else ''
 
         # ── Step 1: Detect video (by signature, content-type, or extension) ──
+        # ── Step 1: Detect image FIRST via real byte sniffing. This must
+        # win over any filename/content-type claim — it's what stops a
+        # photo with a wrongly-defaulted ".mp4" filename from ever being
+        # treated as a video. ──
+        is_definitely_image = detect_image_signature(file_bytes)
+
+        # ── Step 2: Detect video (by signature, content-type, or extension) ──
         is_mp4_signature = len(file_bytes) > 12 and b"ftyp" in file_bytes[4:12]
-        is_video = (
+        is_video = (not is_definitely_image) and (
             c_type.startswith("video/") or
             "video" in c_type or
             f_name.endswith(('.mp4', '.mov', '.avi', '.mkv', '.3gp', '.webm')) or
             is_mp4_signature
         )
 
-        # ── Step 2: Detect image (by content-type OR extension) ──
+        # ── Step 3: Detect image (by content-type, extension, OR signature) ──
         IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif'}
         is_image = (
+            is_definitely_image or
             c_type.startswith("image/") or
             ext in IMAGE_EXTENSIONS
         )
