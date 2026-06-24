@@ -26,6 +26,8 @@ def compute_etag(data) -> str:
 
 
 def delete_storage_blob_from_url(url: str):
+
+    
     """
     Reliably deletes a Firebase Storage blob given its PUBLIC url
     (the kind produced by blob.make_public()), regardless of which
@@ -56,6 +58,126 @@ def delete_storage_blob_from_url(url: str):
             print(f"⚠️ Storage cleanup: blob not found for path '{blob_path}' (url: {url})")
     except Exception as e:
         print(f"⚠️ Storage cleanup failed for url {url}: {e}")
+
+
+def migrate_username_references(old_username: str, new_username: str):
+    """
+    Called after a username rename, BEFORE the old user document is
+    deleted. Firestore does NOT cascade-move subcollections or update
+    string references when a doc is renamed/recreated — every place the
+    old username was stored as data has to be migrated here manually:
+
+      1. Chats + messages   — conversation doc IDs are username-derived
+                               (get_conversation_id sorts the two names),
+                               so renaming a participant changes the doc
+                               ID itself. This is why messages "orphan":
+                               the old conversation becomes unreachable
+                               under the new username.
+      2. This user's own 'friends' and 'rooms' subcollections — these
+         live under users/{old_username}/... and are silently abandoned
+         when the parent doc is deleted (subcollections don't cascade).
+      3. Other users' 'friends' doc that points at this username (doc ID
+         == old username) and their rooms' profiles[]/joined_members[]
+         arrays that list this username as a string.
+      4. Comments this user left on other people's posts.
+    """
+    old_clean = old_username.strip().lower()
+    new_clean = new_username.strip().lower()
+
+    # ---------- 1. CHATS + MESSAGES ----------
+    chats_query = db_fs.collection('chats').where(
+        filter=firestore.FieldFilter("participants", "array_contains", old_clean)
+    ).get()
+
+    for chat_doc in chats_query:
+        chat_data = chat_doc.to_dict()
+        old_participants = chat_data.get("participants", [])
+        new_participants = [
+            new_clean if p.lower().strip() == old_clean else p
+            for p in old_participants
+        ]
+
+        new_conv_id = (
+            get_conversation_id(new_participants[0], new_participants[1])
+            if len(new_participants) == 2
+            else chat_doc.id
+        )
+
+        new_chat_ref = db_fs.collection('chats').document(new_conv_id)
+        new_chat_data = dict(chat_data)
+        new_chat_data["participants"] = new_participants
+        new_chat_ref.set(new_chat_data)
+
+        # Copy every message into the new conversation doc, rewriting
+        # sender/recipient so the message history stays attributed correctly
+        old_messages = chat_doc.reference.collection('messages').get()
+        for m_doc in old_messages:
+            m_data = m_doc.to_dict()
+            if (m_data.get("sender") or "").lower().strip() == old_clean:
+                m_data["sender"] = new_clean
+            if (m_data.get("recipient") or "").lower().strip() == old_clean:
+                m_data["recipient"] = new_clean
+            new_chat_ref.collection('messages').document(m_doc.id).set(m_data)
+            m_doc.reference.delete()
+
+        # Only remove the old doc if the ID actually changed
+        if new_conv_id != chat_doc.id:
+            chat_doc.reference.delete()
+
+    # ---------- 2a. OWN 'friends' SUBCOLLECTION ----------
+    old_friends = db_fs.collection('users').document(old_clean).collection('friends').get()
+    for f_doc in old_friends:
+        db_fs.collection('users').document(new_clean).collection('friends').document(f_doc.id).set(f_doc.to_dict())
+        f_doc.reference.delete()
+
+    # ---------- 2b. OWN 'rooms' SUBCOLLECTION ----------
+    old_rooms = db_fs.collection('users').document(old_clean).collection('rooms').get()
+    for r_doc in old_rooms:
+        r_data = r_doc.to_dict()
+        if r_data.get("owner") == old_clean:
+            r_data["owner"] = new_clean
+        db_fs.collection('users').document(new_clean).collection('rooms').document(r_doc.id).set(r_data)
+        r_doc.reference.delete()
+
+    # ---------- 3. OTHER USERS' REFERENCES TO THIS USERNAME ----------
+    all_users = db_fs.collection('users').get()
+    for u_doc in all_users:
+        if u_doc.id in (old_clean, new_clean):
+            continue
+
+        # 3a. their friend-doc keyed by the old username
+        friend_ref = db_fs.collection('users').document(u_doc.id).collection('friends').document(old_clean)
+        friend_snap = friend_ref.get()
+        if friend_snap.exists:
+            f_data = friend_snap.to_dict()
+            f_data["username"] = new_clean
+            db_fs.collection('users').document(u_doc.id).collection('friends').document(new_clean).set(f_data)
+            friend_ref.delete()
+
+        # 3b. their rooms' profiles[] / joined_members[] string arrays
+        rooms_ref = db_fs.collection('users').document(u_doc.id).collection('rooms')
+        for room_doc in rooms_ref.get():
+            r_data = room_doc.to_dict()
+            changed = False
+            profiles = r_data.get("profiles", [])
+            if old_clean in profiles:
+                profiles = [new_clean if p == old_clean else p for p in profiles]
+                changed = True
+            joined_members = r_data.get("joined_members", [])
+            if old_clean in joined_members:
+                joined_members = [new_clean if m == old_clean else m for m in joined_members]
+                changed = True
+            if changed:
+                room_doc.reference.update({"profiles": profiles, "joined_members": joined_members})
+
+    # ---------- 4. COMMENTS authored under the old username ----------
+    all_posts = db_fs.collection('posts').get()
+    for p_doc in all_posts:
+        old_comments = p_doc.reference.collection('comments').where(
+            filter=firestore.FieldFilter("username", "==", old_clean)
+        ).get()
+        for c_doc in old_comments:
+            c_doc.reference.update({"username": new_clean})
 
 
 resend.api_key = "re_Wbh3nvip_D3hUtXrB1DQTDVrzasgLDsLU"
@@ -443,6 +565,13 @@ async def update_profile(
                 batch_count = 0
         if batch_count > 0:
             batch.commit()
+
+        # ✨ NEW: Migrate every other place the old username was stored —
+        # chats/messages (the source of your orphaned-messages bug), this
+        # user's own friends/rooms subcollections, other users' references
+        # to this username, and comments. Must run BEFORE user_ref.delete()
+        # below, since chats/friends/rooms read from users/{old_username}.
+        migrate_username_references(padding_current, clean_new)
 
         new_ref.set(user_data)
         user_ref.delete()
