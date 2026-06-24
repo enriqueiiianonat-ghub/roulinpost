@@ -757,7 +757,7 @@ def get_sync_status(username: str):
 
 
 @app.get("/posts/{post_id}/comments")
-def get_comments(post_id: str):
+def get_comments(request: Request, response: Response, post_id: str):
     comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
     docs = comments_ref.order_by("timestamp", direction=firestore.Query.ASCENDING).get()
     
@@ -769,6 +769,16 @@ def get_comments(post_id: str):
             "text": d.get("text"),
             "timestamp": d.get("timestamp")
         })
+
+    # ✨ NEW — L3: ETag/304. Comments are re-fetched constantly (notification
+    # modal, reopening the comments sheet) — an unchanged thread now costs
+    # an empty 304 instead of the full list every time.
+    etag = compute_etag(comments_list)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
     return comments_list
 
 @app.post("/posts/{post_id}/comments")
@@ -814,7 +824,7 @@ def get_chat_history(conversation_id: str):
     return messages
 
 @app.get("/chat/conversations/{username}")
-def get_chat_conversations(username: str):
+def get_chat_conversations(request: Request, response: Response, username: str):
     """
     Returns EVERY conversation this user has ever had — read or unread —
     each with the partner's current avatar and last message preview.
@@ -856,6 +866,17 @@ def get_chat_conversations(username: str):
         })
 
     conversations.sort(key=lambda c: c.get("last_updated", 0), reverse=True)
+
+    # ✨ NEW — L3: ETag/304. This is polled every 3 seconds while Chat Mode
+    # is open. Without this, that's a full JSON payload every 3 seconds,
+    # forever, for every logged-in user. With it, an unchanged list costs
+    # an empty 304 — easily the single biggest egress saver in this pass.
+    etag = compute_etag(conversations)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
     return conversations
 
 
@@ -935,7 +956,7 @@ def delete_post(post_id: str, username: str):
     }
 
 @app.get("/users/profile/{username}")
-def get_user_profile(username: str):
+def get_user_profile(request: Request, response: Response, username: str):
     clean_user = username.strip() # Removed .lower() to avoid profile missing errors
     user_doc = db_fs.collection("users").document(clean_user).get()
     if not user_doc.exists:
@@ -950,13 +971,22 @@ def get_user_profile(username: str):
         .value
     )
 
-    return {
+    result = {
         "username": clean_user,
         "profile_url": user_data.get("profile_url", ""),
         "country": user_data.get("country", ""),
         "city": user_data.get("city", ""),
         "post_count": post_count
     }
+
+    # ✨ NEW — L3: ETag/304 for profile metadata.
+    etag = compute_etag(result)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
+    return result
 
 @app.get("/users/friends")
 def get_all_friends():
@@ -1106,12 +1136,22 @@ def create_custom_room(payload: RoomCreatePayload):
     return {"status": "success", "room_id": room_id}
 
 @app.get("/rooms/list/{username}")
-def list_user_rooms(username: str):
+def list_user_rooms(request: Request, response: Response, username: str):
     user_id = username.strip().lower()
     rooms = db_fs.collection('users').document(user_id).collection('rooms').get()
     user_snap = db_fs.collection('users').document(user_id).get()
     default_room_id = user_snap.to_dict().get("default_room_id", "") if user_snap.exists else ""
-    return [{**r.to_dict(), "is_default": (default_room_id != "" and r.id == default_room_id)} for r in rooms]
+    result = [{**r.to_dict(), "is_default": (default_room_id != "" and r.id == default_room_id)} for r in rooms]
+
+    # ✨ NEW — L3: ETag/304. Hit by the Rooms Hub, login restore, invite/
+    # add-to-room dialogs, and the My Rooms list.
+    etag = compute_etag(result)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache"
+    return result
 
 @app.post("/rooms/add-profile")
 def add_profile_to_room(payload: RoomProfilePayload):
