@@ -17,6 +17,8 @@ import tempfile
 import subprocess
 import time
 
+from firebase_admin import messaging
+
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Request, Response, APIRouter
 import hashlib
 
@@ -275,6 +277,55 @@ if not firebase_admin._apps:
             print(f"🚀 Firebase successfully initialized via local file target: {CERT_PATH}")
         else:
             raise RuntimeError(f"❌ Critical Error: Credentials not found via Env or local path: {CERT_PATH}")
+
+
+def send_fcm_push_notification(target_username: str, title: str, body: str, badge_count: int = 1):
+        """
+        Looks up a target user's FCM registration tokens from Firestore 
+        and sends a background push notification to trigger system alerts and icon dots.
+        """
+        clean_target = target_username.strip().lower()
+        try:
+            # Fetch target user metadata to grab their active device notification tokens
+            user_doc = db_fs.collection('users').document(clean_target).get()
+            if not user_doc.exists:
+                return
+            
+            user_data = user_doc.to_dict()
+            # ✨ Note: Your frontend will need to save this token to the user document upon login
+            fcm_tokens = user_data.get("fcm_tokens", [])
+            if not fcm_tokens:
+                print(f"ℹ️ Skipping push: No registered device tokens found for @{clean_target}")
+                return
+
+            for token in fcm_tokens:
+                message = messaging.Message(
+                    notification=messaging.Notification(
+                        title=title,
+                        body=body,
+                    ),
+                    # Web-specific configurations to make PWAs react perfectly
+                    webpush=messaging.WebpushConfig(
+                        notification=messaging.WebpushNotification(
+                            title=title,
+                            body=body,
+                            icon="/icons/icon-192x192.png", # Path to your PWA logo asset
+                            badge="/icons/badge-72x72.png",
+                        ),
+                        fcm_options=messaging.WebpushFCMOptions(
+                            link="/" # Opens the app when clicked
+                        )
+                    ),
+                    token=token,
+                )
+                # Async broadcast to Google/Apple edge networks
+                messaging.send(message)
+            print(f"🚀 Push notification broadcast successfully to @{clean_target}")
+        except Exception as push_err:
+            print(f"⚠️ FCM Push Dispatch Engine Failed: {push_err}")
+
+
+
 
 db_fs = firestore.client()
 # ---------------------------------------------------
@@ -884,6 +935,18 @@ def send_direct_message(payload: ChatMessageSchema):
         "read": False
     })
     
+    # ✨ FIX: Calculate unread count to drive the badging, then dispatch push notification
+    summary = get_incoming_unread_chat_notifications(payload.recipient)
+    total_unread = sum(summary.values()) if summary else 1
+
+    notification_body = "Sent you an attachment" if not payload.text.strip() else payload.text
+    send_fcm_push_notification(
+        target_username=payload.recipient,
+        title=f"New message from @{payload.sender}",
+        body=notification_body,
+        badge_count=total_unread
+    )
+    
     return {"status": "success", "message_id": message_ref.id}
 
 @app.get("/chat/notifications")
@@ -1244,6 +1307,15 @@ def add_friend(payload: FriendActionModel):
         "status": "incoming",
         "timestamp": int(time.time())
     })
+
+    # ✨ FIX: Trigger Push notification to user_b
+    send_fcm_push_notification(
+        target_username=user_b,
+        title="New Friend Request",
+        body=f"@{user_a} sent you a friend request!",
+        badge_count=1
+    )
+
     return {"status": "success", "message": "Friend request sent."}
 
 @app.post("/users/accept-friend")
@@ -1773,3 +1845,6 @@ async def chat_upload_attachment(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Attachment processor engine failure: {str(e)}")
+    
+
+    
