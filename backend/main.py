@@ -93,6 +93,18 @@ def delete_storage_blob_from_url(url: str):
         print(f"⚠️ Storage cleanup failed for url {url}: {e}")
 
 
+DOCUMENT_MIME_MAP = {
+    'pdf': 'application/pdf',
+    'doc': 'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls': 'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'ppt': 'application/vnd.ms-powerpoint',
+    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'txt': 'text/plain',
+}
+
+
 def migrate_username_references(old_username: str, new_username: str):
     """
     Called after a username rename, BEFORE the old user document is
@@ -1703,7 +1715,14 @@ async def chat_upload_attachment(
         # DOCUMENT BRANCH (Saved to documents/ folder)
         # ────────────────────────────────────────────────────────────────────
         elif is_document:
-            determined_type = c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
+            # ✨ FIX: prefer a known extension→MIME mapping over whatever
+            # the client sent. Now that the client sends the real content
+            # type too, this is a defensive backstop for any client that
+            # still sends something generic.
+            determined_type = DOCUMENT_MIME_MAP.get(
+                ext,
+                c_type if c_type and c_type != "application/octet-stream" else "application/octet-stream"
+            )
             blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
