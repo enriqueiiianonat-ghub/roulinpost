@@ -304,38 +304,36 @@ def send_fcm_push_notification(target_username: str, title: str, body: str, badg
                         title=title,
                         body=body,
                     ),
-                    # Android-specific background sound config
+                    # 🟢 Android Subsystem Layer Configuration:
                     android=messaging.AndroidConfig(
-                        priority="high",
+                        priority="high",  # Wakes device from sleep / closed state
                         notification=messaging.AndroidNotification(
-                            sound="default",
-                            channel_id="high_importance_channel"
+                            title=title,
+                            body=body,
+                            sound="default",  # Plays system-default alert ringtone
+                            channel_id="high_importance_channel", # Maps to native channel id
+                            notification_priority=messaging.AndroidNotificationPriority.PRIORITY_HIGH
                         )
                     ),
-                    # Apple APNs background sound config
-                    apns=messaging.APNSConfig(
-                        payload=messaging.APNSPayload(
-                            aps=messaging.Aps(
-                                sound="default",
-                                badge=badge_count,
-                            )
-                        )
-                    ),
-                    # Web-specific configurations to make PWAs react perfectly
+                    # 🟢 iOS PWA WebKit Layer Configuration:
                     webpush=messaging.WebpushConfig(
+                        headers={
+                            "urgency": "high"  # Demands prompt APNs cellular wake up
+                        },
                         notification=messaging.WebpushNotification(
                             title=title,
                             body=body,
-                            icon="/icons/icon-192x192.png", # Path to your PWA logo asset
+                            icon="/icons/icon-192x192.png",
                             badge="/icons/badge-72x72.png",
+                            # Note: iOS PWA environment sound behavior is determined by the phone's 
+                            # active ring/silent side switch and the web browser sound permission.
                         ),
                         fcm_options=messaging.WebpushFCMOptions(
-                            link="/" # Opens the app when clicked
+                            link="/"
                         )
                     ),
                     token=token,
                 )
-                # Async broadcast to Google/Apple edge networks
                 messaging.send(message)
             print(f"🚀 Push notification broadcast successfully to @{clean_target}")
         except Exception as push_err:
