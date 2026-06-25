@@ -304,6 +304,23 @@ def send_fcm_push_notification(target_username: str, title: str, body: str, badg
                         title=title,
                         body=body,
                     ),
+                    # Android-specific background sound config
+                    android=messaging.AndroidConfig(
+                        priority="high",
+                        notification=messaging.AndroidNotification(
+                            sound="default",
+                            channel_id="high_importance_channel"
+                        )
+                    ),
+                    # Apple APNs background sound config
+                    apns=messaging.APNSConfig(
+                        payload=messaging.APNSPayload(
+                            aps=messaging.Aps(
+                                sound="default",
+                                badge=badge_count,
+                            )
+                        )
+                    ),
                     # Web-specific configurations to make PWAs react perfectly
                     webpush=messaging.WebpushConfig(
                         notification=messaging.WebpushNotification(
@@ -324,7 +341,21 @@ def send_fcm_push_notification(target_username: str, title: str, body: str, badg
         except Exception as push_err:
             print(f"⚠️ FCM Push Dispatch Engine Failed: {push_err}")
 
+class FcmTokenPayload(BaseModel):
+    username: str
+    token: str
 
+@app.post("/users/save-fcm-token")
+def save_fcm_token(payload: FcmTokenPayload):
+    clean_user = payload.username.strip().lower()
+    user_ref = db_fs.collection('users').document(clean_user)
+    user_snap = user_ref.get()
+    if user_snap.exists:
+        user_ref.update({
+            "fcm_tokens": firestore.ArrayUnion([payload.token])
+        })
+        return {"status": "success", "message": "FCM device token registered for background delivery"}
+    raise HTTPException(status_code=404, detail="User not found")
 
 
 db_fs = firestore.client()
