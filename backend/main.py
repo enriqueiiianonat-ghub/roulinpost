@@ -450,6 +450,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
+            blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
             blob.upload_from_string(compressed_video_data, content_type="video/mp4")
             blob.content_type = "video/mp4"
             blob.patch()
@@ -464,6 +465,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
             
             determined_type = c_type if c_type else "application/octet-stream"
             blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
+            blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
             blob.upload_from_string(file_bytes, content_type=determined_type)
             blob.content_type = determined_type
             blob.patch()
@@ -494,6 +496,7 @@ async def process_and_upload_media(file: UploadFile) -> str:
                 blob_path = f"posts/{uuid.uuid4()}.jpg"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": "image/jpeg"}
+                blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
                 blob.upload_from_string(compressed_data, content_type="image/jpeg")
                 blob.make_public()
                 return blob.public_url
@@ -518,6 +521,7 @@ def process_and_upload_avatar(file_bytes: bytes) -> str:
         bucket = storage.bucket()
         blob_path = f"avatars/{uuid.uuid4()}.jpg"
         blob = bucket.blob(blob_path)
+        blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
         blob.upload_from_string(output.getvalue(), content_type="image/jpeg")
         blob.make_public()
         return blob.public_url
@@ -1819,6 +1823,7 @@ async def chat_upload_attachment(
             blob_path = f"videos/{unique_id}.mp4"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": "video/mp4", "contentDisposition": "inline"}
+            blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
             blob.upload_from_string(compressed_video_data, content_type="video/mp4")
             blob.content_type = "video/mp4"
             blob.patch()
@@ -1840,6 +1845,7 @@ async def chat_upload_attachment(
             blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
             blob = bucket.blob(blob_path)
             blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
+            blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
             blob.upload_from_string(file_bytes, content_type=determined_type)
             blob.content_type = determined_type
             blob.patch()
@@ -1870,6 +1876,7 @@ async def chat_upload_attachment(
                 blob_path = f"documents/{unique_id}.jpg"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": "image/jpeg", "contentDisposition": "inline"}
+                blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
                 blob.upload_from_string(compressed_data, content_type="image/jpeg")
                 blob.make_public()
                 return {"public_url": blob.public_url}
@@ -1881,6 +1888,7 @@ async def chat_upload_attachment(
                 blob_path = f"documents/{unique_id}.{ext if ext else 'dat'}"
                 blob = bucket.blob(blob_path)
                 blob.metadata = {"contentType": determined_type, "contentDisposition": "attachment"}
+                blob.cache_control = "public, max-age=31536000, immutable"  # ✨ NEW
                 blob.upload_from_string(file_bytes, content_type=determined_type)
                 blob.make_public()
                 return {"public_url": blob.public_url}
