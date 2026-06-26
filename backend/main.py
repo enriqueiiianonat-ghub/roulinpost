@@ -1461,6 +1461,8 @@ def create_custom_room(payload: RoomCreatePayload):
     room_name_clean = payload.room_name.strip()
     if not room_name_clean:
         raise HTTPException(status_code=400, detail="Room name cannot be blank.")
+    if len(room_name_clean) > 8:
+        raise HTTPException(status_code=400, detail="Room name cannot exceed 8 characters.")
     
     room_id = str(uuid.uuid4())[:8]
     room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
@@ -1522,13 +1524,13 @@ def get_room_filtered_posts(request: Request, response: Response, username: str,
     room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
     if not room_snap.exists:
         return []
-        
+
     room_data = room_snap.to_dict()
-    owner_id = room_data.get("owner", user_id) 
+    owner_id = room_data.get("owner", user_id)
     master_room = db_fs.collection('users').document(owner_id).collection('rooms').document(room_id).get()
     if not master_room.exists:
         return []
-        
+
     master_data = master_room.to_dict()
     profiles = master_data.get("profiles", [])
     joined_members = master_data.get("joined_members", [])
@@ -1537,21 +1539,30 @@ def get_room_filtered_posts(request: Request, response: Response, username: str,
     query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
     query = query.order_by("timestamp", direction=firestore.Query.DESCENDING)
     docs = query.get()
-    
+
     posts = []
     author_cache = {}
     for doc in docs:
         d = doc.to_dict()
         author = d.get("username", "")
-        
-        is_joined_member = author in joined_members and author != owner_id
-        if is_joined_member and d.get("target_room_id") != room_id:
+
+        # ✨ STRICT ROOM ISOLATION — applies to EVERY author (owner,
+        # joined members, AND tracked profiles) the same way:
+        #   • Public posts (room_only == False) are trackable — they
+        #     show in any room that follows this author. The Firestore
+        #     query above already restricts `author` to people THIS
+        #     room follows, so no extra check is needed for these.
+        #   • Room-only posts show ONLY in the exact room they were
+        #     posted into. They must never leak into a different room —
+        #     not even a different room belonging to the same author.
+        is_room_only_post = d.get("room_only", False)
+        if is_room_only_post and d.get("target_room_id") != room_id:
             continue
-            
+
         if author not in author_cache:
             a_ref = db_fs.collection('users').document(author).get()
             author_cache[author] = a_ref.to_dict() if a_ref.exists else {}
-            
+
         posts.append({
             "id": doc.id,
             "username": author,
@@ -1564,7 +1575,7 @@ def get_room_filtered_posts(request: Request, response: Response, username: str,
             "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value,
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
         })
-        
+
     start_index = offset
     end_index = offset + limit
     paged_posts = posts[start_index:end_index]
@@ -1607,14 +1618,14 @@ def update_custom_room(payload: RoomUpdatePayload):
     new_room_name = payload.new_name.strip()
     if not new_room_name:
         raise HTTPException(status_code=400, detail="Room name cannot be blank.")
-        
+    if len(new_room_name) > 8:
+        raise HTTPException(status_code=400, detail="Room name cannot exceed 8 characters.")
+
     room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
     room_snap = room_ref.get()
     if not room_snap.exists:
         raise HTTPException(status_code=404, detail="Room not found.")
 
-    # ✨ NEW: only the real owner may edit. A joined member's local copy
-    # is tagged is_shared_collaboration=True and is never the master doc.
     existing_data = room_snap.to_dict()
     if existing_data.get("is_shared_collaboration") is True:
         raise HTTPException(status_code=403, detail="Only the room owner can edit this room.")
@@ -1625,13 +1636,12 @@ def update_custom_room(payload: RoomUpdatePayload):
         "profiles": cleaned_profiles,
     }
 
+    final_members = existing_data.get("joined_members", [])
     if payload.joined_members is not None:
         cleaned_members = [m.strip().lower() for m in payload.joined_members]
         update_payload["joined_members"] = cleaned_members
+        final_members = cleaned_members
 
-        # ✨ NEW: if the owner removed a member here, also delete that
-        # member's stale local copy so it stops appearing in their
-        # own "My Rooms" list.
         old_members = set(existing_data.get("joined_members", []))
         removed_members = old_members - set(cleaned_members)
         for removed in removed_members:
@@ -1640,6 +1650,16 @@ def update_custom_room(payload: RoomUpdatePayload):
                 stale_ref.delete()
 
     room_ref.update(update_payload)
+
+    # ✨ NEW: keep every remaining joined member's local room copy in
+    # sync with the new name — their content (membership, posts) was
+    # never touched, but without this their "My Rooms" view would keep
+    # showing the OLD name indefinitely.
+    for member in final_members:
+        member_room_ref = db_fs.collection('users').document(member).collection('rooms').document(room_id)
+        if member_room_ref.get().exists:
+            member_room_ref.update({"name": new_room_name})
+
     return {"status": "success", "message": "Room updated successfully."}
 
 @app.delete("/rooms/delete")
