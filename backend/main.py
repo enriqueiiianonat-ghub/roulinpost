@@ -1110,7 +1110,7 @@ def add_comment(post_id: str, comment: CommentModel):
     return {"status": "success"}
 
 @app.get("/chat/history/{conversation_id}")
-def get_chat_history(conversation_id: str):
+def get_chat_history(request: Request, response: Response, conversation_id: str):
     chat_ref = (
         db_fs.collection("chats")
         .document(conversation_id)
@@ -1125,13 +1125,26 @@ def get_chat_history(conversation_id: str):
     for doc in docs:
         d = doc.to_dict()
         messages.append({
-            "id": doc.id,  # ✨ NEW: needed so the client can target a delete
+            "id": doc.id,
             "sender": d.get("sender"),
             "recipient": d.get("recipient"),
             "text": d.get("text"),
             "media_url": d.get("media_url"), 
             "timestamp": d.get("timestamp")
         })
+
+    # ✨ NEW — L3 ETag Optimization for Chat Threads
+    # Computes a hash of the entire message thread representation.
+    # If a message is sent, edited, or deleted, the hash instantly shifts.
+    etag = compute_etag(messages)
+    if_none_match = request.headers.get("if-none-match")
+    
+    if if_none_match and if_none_match == etag:
+        # Client already has the exact message snapshot locally. Skip payload delivery completely.
+        return Response(status_code=304)
+
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "no-cache" # Tells browser/app to revalidate every time
     return messages
 
 @app.get("/chat/conversations/{username}")
