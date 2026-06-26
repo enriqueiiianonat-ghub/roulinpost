@@ -304,56 +304,27 @@ def send_fcm_push_notification(target_username: str, title: str, body: str, badg
                         title=title,
                         body=body,
                     ),
-                    # 🟢 Android Subsystem Layer Configuration:
-                    android=messaging.AndroidConfig(
-                        priority="high",  # Wakes device from sleep / closed state
-                        notification=messaging.AndroidNotification(
-                            title=title,
-                            body=body,
-                            sound="default",  # Plays system-default alert ringtone
-                            channel_id="high_importance_channel", # Maps to native channel id
-                            notification_priority=messaging.AndroidNotificationPriority.PRIORITY_HIGH
-                        )
-                    ),
-                    # 🟢 iOS PWA WebKit Layer Configuration:
+                    # Web-specific configurations to make PWAs react perfectly
                     webpush=messaging.WebpushConfig(
-                        headers={
-                            "urgency": "high"  # Demands prompt APNs cellular wake up
-                        },
                         notification=messaging.WebpushNotification(
                             title=title,
                             body=body,
-                            icon="/icons/icon-192x192.png",
+                            icon="/icons/icon-192x192.png", # Path to your PWA logo asset
                             badge="/icons/badge-72x72.png",
-                            # Note: iOS PWA environment sound behavior is determined by the phone's 
-                            # active ring/silent side switch and the web browser sound permission.
                         ),
                         fcm_options=messaging.WebpushFCMOptions(
-                            link="/"
+                            link="/" # Opens the app when clicked
                         )
                     ),
                     token=token,
                 )
+                # Async broadcast to Google/Apple edge networks
                 messaging.send(message)
             print(f"🚀 Push notification broadcast successfully to @{clean_target}")
         except Exception as push_err:
             print(f"⚠️ FCM Push Dispatch Engine Failed: {push_err}")
 
-class FcmTokenPayload(BaseModel):
-    username: str
-    token: str
 
-@app.post("/users/save-fcm-token")
-def save_fcm_token(payload: FcmTokenPayload):
-    clean_user = payload.username.strip().lower()
-    user_ref = db_fs.collection('users').document(clean_user)
-    user_snap = user_ref.get()
-    if user_snap.exists:
-        user_ref.update({
-            "fcm_tokens": firestore.ArrayUnion([payload.token])
-        })
-        return {"status": "success", "message": "FCM device token registered for background delivery"}
-    raise HTTPException(status_code=404, detail="User not found")
 
 
 db_fs = firestore.client()
