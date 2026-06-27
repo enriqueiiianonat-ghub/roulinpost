@@ -1664,7 +1664,14 @@ def update_custom_room(payload: RoomUpdatePayload):
 
 @app.delete("/rooms/delete")
 def delete_room(username: str, room_id: str):
-    """Deletes a room entirely. Only the actual owner may do this."""
+    """Deletes a room entirely. Only the actual owner may do this.
+    Also purges every ROOM-ONLY post that belongs exclusively to this
+    room (room_only == True AND target_room_id == room_id) — both the
+    Firestore post docs (+ their comments subcollections) and their
+    attached media in Storage. Public posts that were made while inside
+    this room (room_only == False) are NOT touched — they still belong
+    to the public/universal feed and must survive the room's deletion.
+    """
     user_id = username.strip().lower()
     room_ref = db_fs.collection('users').document(user_id).collection('rooms').document(room_id)
     room_snap = room_ref.get()
@@ -1675,19 +1682,53 @@ def delete_room(username: str, room_id: str):
     if room_data.get("is_shared_collaboration") is True:
         raise HTTPException(status_code=403, detail="Only the room owner can delete this room.")
 
+    # ── 1. Purge every ROOM-ONLY post tied to this room ──
+    room_only_posts = db_fs.collection('posts').where(
+        filter=firestore.FieldFilter("target_room_id", "==", room_id)
+    ).where(
+        filter=firestore.FieldFilter("room_only", "==", True)
+    ).get()
+
+    purged_post_count = 0
+    purged_media_count = 0
+    for post_doc in room_only_posts:
+        post_data = post_doc.to_dict()
+
+        # Delete attached media (images/videos) from Storage
+        for url in post_data.get("image_urls", []):
+            delete_storage_blob_from_url(url)
+            purged_media_count += 1
+
+        # Comments don't cascade-delete in Firestore — purge them explicitly
+        comment_docs = post_doc.reference.collection('comments').get()
+        for c_doc in comment_docs:
+            c_doc.reference.delete()
+
+        post_doc.reference.delete()
+        purged_post_count += 1
+
+    # ── 2. Remove joined members' local copies of this room ──
     for member in room_data.get("joined_members", []):
         member_room_ref = db_fs.collection('users').document(member).collection('rooms').document(room_id)
         if member_room_ref.get().exists:
             member_room_ref.delete()
 
+    # ── 3. Clear any pending invitations referencing this room ──
     pending_invites = db_fs.collection('room_invitations').where(
         filter=firestore.FieldFilter("room_id", "==", room_id)
     ).get()
     for inv in pending_invites:
         inv.reference.delete()
 
+    # ── 4. Finally, delete the room document itself ──
     room_ref.delete()
-    return {"status": "success", "message": "Room deleted successfully."}
+
+    return {
+        "status": "success",
+        "message": "Room deleted successfully.",
+        "posts_purged": purged_post_count,
+        "media_purged": purged_media_count,
+    }
 
 
 @app.get("/users/profile/{username}/media")
