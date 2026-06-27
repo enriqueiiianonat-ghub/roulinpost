@@ -99249,7 +99249,7 @@ m=o.z
 s=6
 return A.l(m.ce(0),$async$vZ)
 case 6:s=7
-return A.l(m.lr(0,new A.Mu("sounds/ting.mp3",null)),$async$vZ)
+return A.l(m.lr(0,new A.Mu("ting.mp3",null)),$async$vZ)
 case 7:q=1
 s=5
 break
