@@ -1519,14 +1519,25 @@ def set_default_app_room(payload: RoomDefaultPayload):
     return {"status": "success"}
 
 @app.get("/posts/room/{username}/{room_id}")
-def get_room_filtered_posts(request: Request, response: Response, username: str, room_id: str, limit: int = 10, offset: int = 0):
+def get_room_filtered_posts(
+    request: Request,
+    response: Response,
+    username: str,
+    room_id: str,
+    limit: int = 10,
+    offset: int = 0,
+    profile_username: Optional[str] = None
+):
     user_id = username.strip().lower()
+    selected_profile = profile_username.strip() if profile_username else None
+
     room_snap = db_fs.collection('users').document(user_id).collection('rooms').document(room_id).get()
     if not room_snap.exists:
         return []
 
     room_data = room_snap.to_dict()
     owner_id = room_data.get("owner", user_id)
+
     master_room = db_fs.collection('users').document(owner_id).collection('rooms').document(room_id).get()
     if not master_room.exists:
         return []
@@ -1536,28 +1547,36 @@ def get_room_filtered_posts(request: Request, response: Response, username: str,
     joined_members = master_data.get("joined_members", [])
     query_profiles = list(set(profiles + joined_members + [owner_id]))
 
-    query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "in", query_profiles))
+    if selected_profile:
+        if selected_profile not in query_profiles:
+            return []
+        query_profiles = [selected_profile]
+
+    query = db_fs.collection('posts').where(
+        filter=firestore.FieldFilter("username", "in", query_profiles)
+    )
     query = query.order_by("timestamp", direction=firestore.Query.DESCENDING)
     docs = query.get()
 
     posts = []
     author_cache = {}
+
     for doc in docs:
         d = doc.to_dict()
         author = d.get("username", "")
 
-        # ✨ STRICT ROOM ISOLATION — applies to EVERY author (owner,
-        # joined members, AND tracked profiles) the same way:
-        #   • Public posts (room_only == False) are trackable — they
-        #     show in any room that follows this author. The Firestore
-        #     query above already restricts `author` to people THIS
-        #     room follows, so no extra check is needed for these.
-        #   • Room-only posts show ONLY in the exact room they were
-        #     posted into. They must never leak into a different room —
-        #     not even a different room belonging to the same author.
-        is_room_only_post = d.get("room_only", False)
-        if is_room_only_post and d.get("target_room_id") != room_id:
-            continue
+        if selected_profile:
+            if author != selected_profile:
+                continue
+
+            # When viewing a profile inside a room, show only posts made in this room.
+            # Do not show public/universal posts.
+            if d.get("target_room_id") != room_id:
+                continue
+        else:
+            is_room_only_post = d.get("room_only", False)
+            if is_room_only_post and d.get("target_room_id") != room_id:
+                continue
 
         if author not in author_cache:
             a_ref = db_fs.collection('users').document(author).get()
@@ -1572,13 +1591,13 @@ def get_room_filtered_posts(request: Request, response: Response, username: str,
             "message": d.get("message"),
             "image_urls": d.get("image_urls", []),
             "likes": d.get("likes", 0),
+            "room_only": d.get("room_only", False),
+            "target_room_id": d.get("target_room_id", ""),
             "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value,
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
         })
 
-    start_index = offset
-    end_index = offset + limit
-    paged_posts = posts[start_index:end_index]
+    paged_posts = posts[offset:offset + limit]
 
     etag = compute_etag(paged_posts)
     if_none_match = request.headers.get("if-none-match")
