@@ -1751,13 +1751,56 @@ def delete_room(username: str, room_id: str):
 
 
 @app.get("/users/profile/{username}/media")
-def get_user_profile_media(username: str):
+def get_user_profile_media(username: str, viewer_username: Optional[str] = None):
     clean_user = username.strip() # Removed .lower() so images show up on walls correctly
+    clean_viewer = viewer_username.strip().lower() if viewer_username else None
+
     posts_query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "==", clean_user)).get()
     photos = []
     videos = []
+
+    # ✨ NEW: cache room membership lookups per room_id so we don't re-fetch
+    # the same room doc once per private post inside it.
+    room_membership_cache = {}
+
+    def viewer_can_see_room(room_id: str) -> bool:
+        """
+        True if clean_viewer is the room's owner, an approved joined
+        member, or a tracked profile of the room. Rooms are stored under
+        users/{owner}/rooms/{room_id} — the owner here is always the
+        post author (clean_user), since that's whose room the post was
+        made into.
+        """
+        if not clean_viewer or not room_id:
+            return False
+        if room_id in room_membership_cache:
+            return clean_viewer in room_membership_cache[room_id]
+
+        allowed_users = set()
+        room_ref = db_fs.collection('users').document(clean_user.lower()).collection('rooms').document(room_id)
+        room_snap = room_ref.get()
+        if room_snap.exists:
+            room_data = room_snap.to_dict()
+            allowed_users.add(clean_user.lower())  # owner always sees their own room
+            allowed_users.update(room_data.get('joined_members', []))
+            allowed_users.update(room_data.get('profiles', []))
+
+        room_membership_cache[room_id] = allowed_users
+        return clean_viewer in allowed_users
+
     for doc in posts_query:
         post_data = doc.to_dict()
+
+        # ✨ UPDATED gallery visibility rule —
+        #   • room_only == False → post is public → always INCLUDE.
+        #   • room_only == True  → post is private to a specific room.
+        #     INCLUDE only if the viewer is a member/owner/tracked
+        #     profile of that exact room; otherwise EXCLUDE.
+        if post_data.get("room_only", False):
+            target_room_id = post_data.get("target_room_id", "")
+            if not viewer_can_see_room(target_room_id):
+                continue
+
         image_urls = post_data.get("image_urls", [])
         for url in image_urls:
             if "videos/" in url or url.lower().endswith(('.mp4', '.mov', '.avi', '.webm')):
