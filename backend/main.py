@@ -20,11 +20,83 @@ import time
 from firebase_admin import messaging
 
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Request, Response, APIRouter
+from fastapi.responses import JSONResponse
 import hashlib
 
 def compute_etag(data) -> str:
     raw = py_json.dumps(data, sort_keys=True, default=str).encode('utf-8')
     return 'W/"' + hashlib.md5(raw).hexdigest() + '"'
+
+
+_API_RESPONSE_CACHE = {}
+_API_RESPONSE_CACHE_MAX = 300
+
+def api_cache_get(request: Request, key: str):
+    item = _API_RESPONSE_CACHE.get(key)
+    if not item:
+        return None
+
+    if item["expires_at"] < time.time():
+        _API_RESPONSE_CACHE.pop(key, None)
+        return None
+
+    etag = item["etag"]
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=15, stale-while-revalidate=60",
+        "X-Cache": "HIT",
+    }
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+
+    return JSONResponse(content=item["data"], headers=headers)
+
+def api_cache_set(key: str, data, ttl_seconds: int = 15):
+    if len(_API_RESPONSE_CACHE) >= _API_RESPONSE_CACHE_MAX:
+        oldest_key = min(
+            _API_RESPONSE_CACHE,
+            key=lambda k: _API_RESPONSE_CACHE[k]["expires_at"],
+        )
+        _API_RESPONSE_CACHE.pop(oldest_key, None)
+
+    etag = compute_etag(data)
+    _API_RESPONSE_CACHE[key] = {
+        "data": data,
+        "etag": etag,
+        "expires_at": time.time() + ttl_seconds,
+    }
+    return etag
+
+def api_cached_json_response(
+    request: Request,
+    response: Response,
+    key: str,
+    data,
+    ttl_seconds: int = 15,
+):
+    etag = api_cache_set(key, data, ttl_seconds)
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "private, max-age=15, stale-while-revalidate=60",
+                "X-Cache": "MISS-304",
+            },
+        )
+
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
+    response.headers["X-Cache"] = "MISS"
+    return data
+
+def api_cache_clear(prefix: str = ""):
+    keys = list(_API_RESPONSE_CACHE.keys())
+    for key in keys:
+        if not prefix or key.startswith(prefix):
+            _API_RESPONSE_CACHE.pop(key, None)
 
 
 def detect_image_signature(file_bytes: bytes) -> bool:
@@ -240,7 +312,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["ETag"],   # ✨ NEW — without this, web can't read the ETag header at all
+    expose_headers=["ETag", "Cache-Control", "X-Cache"],   # ✨ NEW — without this, web can't read the ETag header at all
 )
 
 class RoomInvitePayload(BaseModel):
@@ -801,7 +873,13 @@ def delete_user_account(username: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/posts")
+
+
 def get_posts(request: Request, response: Response, limit: int = 10, offset: int = 0, username: Optional[str] = None):
+    cache_key = f"posts:{username or 'public'}:{limit}:{offset}"
+    cached = api_cache_get(request, cache_key)
+    if cached is not None:
+        return cached
     query = db_fs.collection('posts')
     if username:
         query = query.where(filter=firestore.FieldFilter("username", "==", username))
@@ -847,14 +925,13 @@ def get_posts(request: Request, response: Response, limit: int = 10, offset: int
     posts = [p for p in posts if not p.get("room_only", False)]
 
     # ✨ NEW — ETag check
-    etag = compute_etag(posts)
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=304)
-
-    response.headers["ETag"] = etag
-    response.headers["Cache-Control"] = "no-cache"
-    return posts
+    return api_cached_json_response(
+        request,
+        response,
+        cache_key,
+        posts,
+        ttl_seconds=15,
+    )
 
 @app.post("/posts")
 async def create_post(
@@ -886,6 +963,8 @@ async def create_post(
         post_data['target_room_id'] = target_room_id
         
     post_ref.set(post_data)
+    api_cache_clear("posts:")
+    api_cache_clear(f"profile:{username.strip()}")
     return {"message": "Post created successfully"}
 
 @app.put("/posts/{post_id}")
@@ -1285,6 +1364,10 @@ def delete_post(post_id: str, username: str):
 
 @app.get("/users/profile/{username}")
 def get_user_profile(request: Request, response: Response, username: str):
+    cache_key = f"profile:{username.strip()}"
+    cached = api_cache_get(request, cache_key)
+    if cached is not None:
+        return cached
     clean_user = username.strip() # Removed .lower() to avoid profile missing errors
     user_doc = db_fs.collection("users").document(clean_user).get()
     if not user_doc.exists:
@@ -1308,13 +1391,13 @@ def get_user_profile(request: Request, response: Response, username: str):
     }
 
     # ✨ NEW — L3: ETag/304 for profile metadata.
-    etag = compute_etag(result)
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=304)
-    response.headers["ETag"] = etag
-    response.headers["Cache-Control"] = "no-cache"
-    return result
+    return api_cached_json_response(
+        request,
+        response,
+        cache_key,
+        result,
+        ttl_seconds=30,
+    )
 
 @app.get("/users/friends")
 def get_all_friends():
