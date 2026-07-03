@@ -1130,6 +1130,7 @@ def get_sync_status(username: str):
     pending_invites_count = len(invite_docs)
 
     # 3. Unread comments on my posts — count only, never the comment text itself
+    # 3. Unread comments on my posts — count only, never the comment text itself
     my_posts_query = db_fs.collection('posts').where(
         filter=firestore.FieldFilter("username", "==", clean_user)
     ).get()
@@ -1142,10 +1143,20 @@ def get_sync_status(username: str):
             if (c.to_dict().get("username") or "").strip().lower() != clean_user
         )
 
+    # ✨ NEW: 4. Pending INCOMING friend requests — count only. This was
+    # previously served by /users/notifications-count but the frontend
+    # switched to polling /sync exclusively, so the friend-request red
+    # dot silently stopped firing once that migration happened.
+    pending_friend_docs = db_fs.collection('users').document(clean_user).collection('friends').where(
+        filter=firestore.FieldFilter("status", "==", "incoming")
+    ).get()
+    pending_friend_requests_count = len(pending_friend_docs)
+
     return {
         "chat_badges": chat_badges,
         "pending_room_invites": pending_invites_count,
         "unread_comment_count": unread_comment_count,
+        "pending_friend_requests": pending_friend_requests_count,  # ✨ NEW
     }
 
 
@@ -1449,11 +1460,21 @@ def add_friend(payload: FriendActionModel):
 
 @app.post("/users/accept-friend")
 def accept_friend(payload: FriendActionModel):
-    user_a = payload.current_user.strip().lower() 
-    user_b = payload.target_user.strip().lower()  
-    
+    user_a = payload.current_user.strip().lower()   # the one accepting
+    user_b = payload.target_user.strip().lower()    # the original requester
+
     db_fs.collection('users').document(user_a).collection('friends').document(user_b).update({"status": "accepted"})
     db_fs.collection('users').document(user_b).collection('friends').document(user_a).update({"status": "accepted"})
+
+    # ✨ NEW: Notify the original requester (user_b) that their request
+    # was accepted — mirrors the push already sent in add_friend().
+    send_fcm_push_notification(
+        target_username=user_b,
+        title="Friend Request Accepted",
+        body=f"@{user_a} accepted your friend request!",
+        badge_count=1
+    )
+
     return {"status": "success"}
 
 @app.post("/users/decline-friend")
