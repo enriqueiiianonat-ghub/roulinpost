@@ -701,7 +701,9 @@ def login(user: UserLogin):
         "email": u_data.get("email"), 
         "profile_url": u_data.get("profile_url", ""),
         "country": u_data.get("country", ""),  
-        "city": u_data.get("city", "")         
+        "city": u_data.get("city", ""),
+        "gallery_visibility": u_data.get("gallery_visibility", "public"),        # ✨ NEW
+        "gallery_selected_viewers": u_data.get("gallery_selected_viewers", []),  # ✨ NEW
     }
 
 class ForgotPasswordRequest(BaseModel):
@@ -754,7 +756,9 @@ async def update_profile(
     country: Optional[str] = Form(""),  
     city: Optional[str] = Form(""),     
     new_password: Optional[str] = Form(None),
-    avatar_file: Optional[UploadFile] = File(None)
+    avatar_file: Optional[UploadFile] = File(None),
+    gallery_visibility: Optional[str] = Form(None),        # ✨ NEW: "public" | "friends" | "selected"
+    gallery_selected_viewers: Optional[str] = Form(None),   # ✨ NEW: JSON-encoded list of usernames
 ):
     padding_current = current_username.strip().lower()
     clean_new = new_username.strip().lower()
@@ -780,6 +784,21 @@ async def update_profile(
 
     user_data['country'] = country or ""
     user_data['city'] = city or ""
+
+    # ✨ NEW: "Who can see my photo in gallery"
+    if gallery_visibility is not None:
+        clean_visibility = gallery_visibility.strip().lower()
+        if clean_visibility in ("public", "friends", "selected"):
+            user_data['gallery_visibility'] = clean_visibility
+    if gallery_selected_viewers is not None:
+        try:
+            parsed_viewers = py_json.loads(gallery_selected_viewers)
+            user_data['gallery_selected_viewers'] = [
+                str(v).strip().lower() for v in parsed_viewers if str(v).strip()
+            ]
+        except Exception:
+            pass
+
 
     if clean_new != padding_current:
         new_ref = db_fs.collection('users').document(clean_new)
@@ -826,7 +845,9 @@ async def update_profile(
             "email": new_email, 
             "profile_url": user_data.get("profile_url", ""),
             "country": user_data['country'],
-            "city": user_data['city']
+            "city": user_data['city'],
+            "gallery_visibility": user_data.get("gallery_visibility", "public"),        # ✨ NEW
+            "gallery_selected_viewers": user_data.get("gallery_selected_viewers", []),  # ✨ NEW
         }
 
     user_data['email'] = new_email
@@ -838,7 +859,9 @@ async def update_profile(
         "email": new_email, 
         "profile_url": user_data.get("profile_url", ""),
         "country": user_data['country'],
-        "city": user_data['city']
+        "city": user_data['city'],
+        "gallery_visibility": user_data.get("gallery_visibility", "public"),        # ✨ NEW
+        "gallery_selected_viewers": user_data.get("gallery_selected_viewers", []),  # ✨ NEW
     }
 
 @app.delete("/auth/profile/{username}")
@@ -1086,6 +1109,7 @@ def get_incoming_unread_chat_notifications(recipient: str):
 class CommentModel(BaseModel):
     username: str
     text: str
+    reply_to_comment_id: Optional[str] = None  # ✨ NEW: set when this comment is a reply
 
 
 @app.get("/sync/{username}")
@@ -1131,11 +1155,13 @@ def get_sync_status(username: str):
 
     # 3. Unread comments on my posts — count only, never the comment text itself
     # 3. Unread comments on my posts — count only, never the comment text itself
+    # 3. Unread comments on my posts — count only, never the comment text itself
     my_posts_query = db_fs.collection('posts').where(
         filter=firestore.FieldFilter("username", "==", clean_user)
     ).get()
 
     unread_comment_count = 0
+    unread_reply_count = 0  # ✨ NEW
     for post_doc in my_posts_query:
         comment_docs = post_doc.reference.collection('comments').get()
         unread_comment_count += sum(
@@ -1143,10 +1169,33 @@ def get_sync_status(username: str):
             if (c.to_dict().get("username") or "").strip().lower() != clean_user
         )
 
-    # ✨ NEW: 4. Pending INCOMING friend requests — count only. This was
-    # previously served by /users/notifications-count but the frontend
-    # switched to polling /sync exclusively, so the friend-request red
-    # dot silently stopped firing once that migration happened.
+    # ✨ NEW: replies to MY comments, even on posts I don't own. Collection
+    # group query scans every post's 'comments' subcollection at once —
+    # far cheaper than looping every post in the system.
+    my_comment_ids_by_post = {}
+    all_comments_query = db_fs.collection_group('comments').where(
+        filter=firestore.FieldFilter("username", "==", clean_user)
+    ).get()
+    for c_doc in all_comments_query:
+        my_comment_ids_by_post.setdefault(c_doc.reference.parent.parent.id, set()).add(c_doc.id)
+
+    if my_comment_ids_by_post:
+        replies_query = db_fs.collection_group('comments').where(
+            filter=firestore.FieldFilter("parent_id", "!=", None)
+        ).get()
+        for r_doc in replies_query:
+            r_data = r_doc.to_dict()
+            parent_post_id = r_doc.reference.parent.parent.id
+            parent_id = r_data.get("parent_id")
+            replier = (r_data.get("username") or "").strip().lower()
+            if (
+                replier != clean_user
+                and parent_post_id in my_comment_ids_by_post
+                and parent_id in my_comment_ids_by_post[parent_post_id]
+            ):
+                unread_reply_count += 1
+
+    # ✨ NEW: 4. Pending INCOMING friend requests — count only.
     pending_friend_docs = db_fs.collection('users').document(clean_user).collection('friends').where(
         filter=firestore.FieldFilter("status", "==", "incoming")
     ).get()
@@ -1156,7 +1205,8 @@ def get_sync_status(username: str):
         "chat_badges": chat_badges,
         "pending_room_invites": pending_invites_count,
         "unread_comment_count": unread_comment_count,
-        "pending_friend_requests": pending_friend_requests_count,  # ✨ NEW
+        "unread_reply_count": unread_reply_count,  # ✨ NEW
+        "pending_friend_requests": pending_friend_requests_count,
     }
 
 
@@ -1170,9 +1220,11 @@ def get_comments(request: Request, response: Response, post_id: str):
     for doc in docs:
         d = doc.to_dict()
         comments_list.append({
+            "id": doc.id,  # ✨ NEW: needed so the client can reply to / nest under this comment
             "username": d.get("username"),
             "text": d.get("text"),
-            "timestamp": d.get("timestamp")
+            "timestamp": d.get("timestamp"),
+            "parent_id": d.get("parent_id"),  # ✨ NEW: null for top-level, else the comment being replied to
         })
 
     # ✨ NEW — L3: ETag/304. Comments are re-fetched constantly (notification
@@ -1194,14 +1246,37 @@ def add_comment(post_id: str, comment: CommentModel):
     post_ref = db_fs.collection('posts').document(post_id)
     if not post_ref.get().exists:
         raise HTTPException(status_code=404, detail="Post not found")
-        
+
+    commenter = comment.username.strip()
+    parent_id = (comment.reply_to_comment_id or "").strip() or None
+
     comment_data = {
-        "username": comment.username.strip(),
+        "username": commenter,
         "text": comment.text.strip(),
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
+        "parent_id": parent_id,  # ✨ NEW: None for a top-level comment
     }
-    post_ref.collection('comments').add(comment_data)
-    return {"status": "success"}
+    new_comment_ref = post_ref.collection('comments').add(comment_data)[1]
+
+    # ✨ NEW: Notify the parent comment's author that someone replied —
+    # separate from (and in addition to) the existing unread comment
+    # count on the post owner's own posts.
+    if parent_id:
+        parent_snap = post_ref.collection('comments').document(parent_id).get()
+        if parent_snap.exists:
+            parent_author = (parent_snap.to_dict().get("username") or "").strip()
+            if parent_author and parent_author.lower() != commenter.lower():
+                preview = comment.text.strip()
+                if len(preview) > 80:
+                    preview = preview[:80] + "…"
+                send_fcm_push_notification(
+                    target_username=parent_author,
+                    title="New Reply",
+                    body=f"@{commenter} replied to your comment: {preview}",
+                    badge_count=1
+                )
+
+    return {"status": "success", "id": new_comment_ref.id}
 
 @app.get("/chat/history/{conversation_id}")
 def get_chat_history(request: Request, response: Response, conversation_id: str):
@@ -1857,7 +1932,29 @@ def delete_room(username: str, room_id: str):
 @app.get("/users/profile/{username}/media")
 def get_user_profile_media(username: str, viewer_username: Optional[str] = None):
     clean_user = username.strip() # Removed .lower() so images show up on walls correctly
+    clean_user_lower = clean_user.lower()
     clean_viewer = viewer_username.strip().lower() if viewer_username else None
+
+    # ✨ NEW: Gallery-level visibility gate — "Who can see my photo in gallery".
+    # This is checked BEFORE any per-post room_only logic below; it decides
+    # whether the viewer gets to see the gallery at all.
+    owner_snap = db_fs.collection('users').document(clean_user_lower).get()
+    owner_data = owner_snap.to_dict() if owner_snap.exists else {}
+    gallery_visibility = owner_data.get("gallery_visibility", "public")
+    is_owner_viewing = clean_viewer is not None and clean_viewer == clean_user_lower
+
+    if not is_owner_viewing and gallery_visibility != "public":
+        if gallery_visibility == "friends":
+            is_friend = False
+            if clean_viewer:
+                friend_snap = db_fs.collection('users').document(clean_user_lower).collection('friends').document(clean_viewer).get()
+                is_friend = friend_snap.exists and friend_snap.to_dict().get("status") == "accepted"
+            if not is_friend:
+                return {"photos": [], "videos": []}
+        elif gallery_visibility == "selected":
+            selected_viewers = set(owner_data.get("gallery_selected_viewers", []))
+            if not clean_viewer or clean_viewer not in selected_viewers:
+                return {"photos": [], "videos": []}
 
     posts_query = db_fs.collection('posts').where(filter=firestore.FieldFilter("username", "==", clean_user)).get()
     photos = []
