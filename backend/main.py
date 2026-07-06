@@ -431,6 +431,104 @@ def save_fcm_token(payload: FcmTokenPayload):
 db_fs = firestore.client()
 # ---------------------------------------------------
 
+# ============================================================
+# 🧹 AUTO-PURGE — expired posts & chat messages
+#   • Public posts (room_only == False), including ones made
+#     inside a room but also shown publicly → expire in 7 days
+#   • Room-exclusive posts (room_only == True) → expire in 15 days
+#   • Chat messages → expire in 7 days
+# Runs on a background loop started at app startup, no external
+# cron needed. Deletes Storage media + comments subcollection +
+# the doc itself for posts; attachment + doc for messages.
+# ============================================================
+POST_PUBLIC_EXPIRY_DAYS = 7
+POST_ROOM_ONLY_EXPIRY_DAYS = 15
+MESSAGE_EXPIRY_DAYS = 7
+PURGE_INTERVAL_SECONDS = 60 * 60  # check hourly
+
+
+def _purge_expired_posts():
+    now_ts = time.time()
+    all_posts = db_fs.collection('posts').get()
+    purged_count = 0
+    media_purged = 0
+
+    for doc in all_posts:
+        d = doc.to_dict()
+        ts = d.get("timestamp")
+        if ts is None:
+            continue
+        try:
+            post_epoch = ts.timestamp()  # Firestore SERVER_TIMESTAMP -> datetime
+        except AttributeError:
+            try:
+                post_epoch = float(ts)
+            except (TypeError, ValueError):
+                continue
+
+        is_room_only = d.get("room_only", False)
+        expiry_days = POST_ROOM_ONLY_EXPIRY_DAYS if is_room_only else POST_PUBLIC_EXPIRY_DAYS
+        if (now_ts - post_epoch) < expiry_days * 86400:
+            continue
+
+        # Expired — purge Storage media, comments subcollection, then the post
+        for url in d.get("image_urls", []):
+            delete_storage_blob_from_url(url)
+            media_purged += 1
+        for c_doc in doc.reference.collection('comments').get():
+            c_doc.reference.delete()
+        doc.reference.delete()
+        purged_count += 1
+
+    if purged_count:
+        print(f"🧹 Auto-purge: removed {purged_count} expired post(s), {media_purged} media file(s).")
+        api_cache_clear("posts:")
+        api_cache_clear("profile:")
+
+
+def _purge_expired_messages():
+    now_ts = time.time()
+    cutoff = int(now_ts - MESSAGE_EXPIRY_DAYS * 86400)
+    purged_messages = 0
+
+    for chat_doc in db_fs.collection('chats').get():
+        old_messages = chat_doc.reference.collection('messages').where(
+            filter=firestore.FieldFilter("timestamp", "<", cutoff)
+        ).get()
+        for m_doc in old_messages:
+            media_url = m_doc.to_dict().get("media_url")
+            if media_url:
+                delete_storage_blob_from_url(media_url)
+            m_doc.reference.delete()
+            purged_messages += 1
+
+    if purged_messages:
+        print(f"🧹 Auto-purge: removed {purged_messages} expired chat message(s).")
+
+
+async def _purge_loop():
+    while True:
+        try:
+            _purge_expired_posts()
+            _purge_expired_messages()
+        except Exception as e:
+            print(f"⚠️ Auto-purge cycle failed: {e}")
+        await asyncio.sleep(PURGE_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def _start_purge_task():
+    asyncio.create_task(_purge_loop())
+
+
+# ✨ Optional: manual trigger for testing, without waiting for the hourly loop
+@app.post("/admin/purge-expired")
+def manual_purge_trigger():
+    _purge_expired_posts()
+    _purge_expired_messages()
+    return {"status": "success", "message": "Purge cycle executed."}
+
+
 class UserRegister(BaseModel):
     username: str
     email: EmailStr
@@ -915,7 +1013,7 @@ def get_posts(request: Request, response: Response, limit: int = 10, offset: int
         d = doc.to_dict()
         author = d.get("username", "")
         post_id = doc.id
-        
+
         if author not in author_cache:
             author_ref = db_fs.collection('users').document(author).get()
             if author_ref.exists:
@@ -927,10 +1025,10 @@ def get_posts(request: Request, response: Response, limit: int = 10, offset: int
                 }
             else:
                 author_cache[author] = {"avatar": "", "country": "", "city": ""}
-        
+
         comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
         comment_count = comments_ref.count().get()[0][0].value
-                
+
         posts.append({
             "id": post_id,
             "username": author,
@@ -942,6 +1040,7 @@ def get_posts(request: Request, response: Response, limit: int = 10, offset: int
             "likes": d.get("likes", 0),
             "room_only": d.get("room_only", False),
             "comment_count": comment_count,
+            "views": d.get("views", 0),  # ✨ NEW
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None 
         })
         
@@ -1034,6 +1133,36 @@ def like_post(post_id: str):
     return {"message": "Liked"}
 
 router = APIRouter()
+
+
+class PostViewPayload(BaseModel):
+    viewer_username: Optional[str] = None
+
+@app.post("/posts/{post_id}/view")
+def register_post_view(post_id: str, payload: PostViewPayload):
+    post_ref = db_fs.collection('posts').document(post_id)
+    snap = post_ref.get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    post_data = snap.to_dict()
+    # ✨ Only public posts are tracked — room-exclusive posts aren't "public view"
+    if post_data.get("room_only", False):
+        return {"status": "skipped", "reason": "not a public post"}
+
+    author = (post_data.get("username") or "").strip().lower()
+    viewer = (payload.viewer_username or "").strip().lower()
+
+    # Don't count the author viewing their own post
+    if viewer and viewer == author:
+        return {"status": "skipped", "reason": "self-view"}
+
+    post_ref.update({"views": firestore.Increment(1)})
+    return {"status": "success"}
+
+
+
+
 
 class ChatMessageSchema(BaseModel):
     sender: str
@@ -1773,6 +1902,7 @@ def get_room_filtered_posts(
             "room_only": d.get("room_only", False),
             "target_room_id": d.get("target_room_id", ""),
             "comment_count": db_fs.collection('posts').document(doc.id).collection('comments').count().get()[0][0].value,
+            "views": d.get("views", 0),  # ✨ NEW
             "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
         })
 
