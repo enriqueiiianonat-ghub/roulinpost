@@ -1252,92 +1252,96 @@ def get_sync_status(username: str):
     clean_user = username.strip().lower()
 
     # 1. Chat unread badges (same logic as /chat/notifications, just inlined)
+    # 1. Chat unread badges (same logic as /chat/notifications, just inlined)
     chat_badges = {}
-    chats_query = db_fs.collection('chats').where(
-        filter=firestore.FieldFilter("participants", "array_contains", clean_user)
-    ).get()
-
-    for chat_doc in chats_query:
-        participants = chat_doc.to_dict().get("participants", [])
-        sender_targets = [p for p in participants if p.lower().strip() != clean_user]
-        if not sender_targets:
-            continue
-        sender_label = sender_targets[0]
-
-        messages_ref = chat_doc.reference.collection('messages')
-        unread_docs = messages_ref.where(
-            filter=firestore.FieldFilter("sender", "==", sender_label)
-        ).where(
-            filter=firestore.FieldFilter("read", "==", False)
+    try:
+        chats_query = db_fs.collection('chats').where(
+            filter=firestore.FieldFilter("participants", "array_contains", clean_user)
         ).get()
 
-        if len(unread_docs) > 0:
-            chat_badges[sender_label] = len(unread_docs)
+        for chat_doc in chats_query:
+            participants = chat_doc.to_dict().get("participants", [])
+            sender_targets = [p for p in participants if p.lower().strip() != clean_user]
+            if not sender_targets:
+                continue
+            sender_label = sender_targets[0]
+
+            messages_ref = chat_doc.reference.collection('messages')
+            unread_docs = messages_ref.where(
+                filter=firestore.FieldFilter("sender", "==", sender_label)
+            ).where(
+                filter=firestore.FieldFilter("read", "==", False)
+            ).get()
+
+            if len(unread_docs) > 0:
+                chat_badges[sender_label] = len(unread_docs)
+    except Exception as e:
+        print(f"⚠️ /sync: chat_badges failed, defaulting to empty: {e}")
+        chat_badges = {}
 
     # 2. Pending room invitations — just the count, the modal fetches the full list on-demand
-    invite_docs = db_fs.collection('room_invitations').where(
-        filter=firestore.FieldFilter("recipient", "==", clean_user)
-    ).where(
-        filter=firestore.FieldFilter("status", "==", "pending")
-    ).get()
-    pending_invites_count = len(invite_docs)
-
-    # 3. Unread comments on my posts — count only, never the comment text itself
-    # 3. Unread comments on my posts — count only, never the comment text itself
-    # 3. Unread comments on my posts — count only, never the comment text itself
-    my_posts_query = db_fs.collection('posts').where(
-        filter=firestore.FieldFilter("username", "==", clean_user)
-    ).get()
-
-    unread_comment_count = 0
-    unread_reply_count = 0  # ✨ NEW
-    for post_doc in my_posts_query:
-        comment_docs = post_doc.reference.collection('comments').get()
-        unread_comment_count += sum(
-            1 for c in comment_docs
-            if (c.to_dict().get("username") or "").strip().lower() != clean_user
-        )
-
-    # ✨ NEW: replies to MY comments, even on posts I don't own. Collection
-    # group query scans every post's 'comments' subcollection at once —
-    # far cheaper than looping every post in the system.
-    my_comment_ids_by_post = {}
-    all_comments_query = db_fs.collection_group('comments').where(
-        filter=firestore.FieldFilter("username", "==", clean_user)
-    ).get()
-    for c_doc in all_comments_query:
-        my_comment_ids_by_post.setdefault(c_doc.reference.parent.parent.id, set()).add(c_doc.id)
-
-    if my_comment_ids_by_post:
-        replies_query = db_fs.collection_group('comments').where(
-            filter=firestore.FieldFilter("parent_id", "!=", None)
+    pending_invites_count = 0
+    try:
+        invite_docs = db_fs.collection('room_invitations').where(
+            filter=firestore.FieldFilter("recipient", "==", clean_user)
+        ).where(
+            filter=firestore.FieldFilter("status", "==", "pending")
         ).get()
-        for r_doc in replies_query:
-            r_data = r_doc.to_dict()
-            parent_post_id = r_doc.reference.parent.parent.id
-            parent_id = r_data.get("parent_id")
-            replier = (r_data.get("username") or "").strip().lower()
-            if (
-                replier != clean_user
-                and parent_post_id in my_comment_ids_by_post
-                and parent_id in my_comment_ids_by_post[parent_post_id]
-            ):
-                unread_reply_count += 1
+        pending_invites_count = len(invite_docs)
+    except Exception as e:
+        print(f"⚠️ /sync: pending_invites_count failed, defaulting to 0: {e}")
+        pending_invites_count = 0
 
-    # ✨ NEW: 4. Pending INCOMING friend requests — count only.
-    pending_friend_docs = db_fs.collection('users').document(clean_user).collection('friends').where(
-        filter=firestore.FieldFilter("status", "==", "incoming")
-    ).get()
-    pending_friend_requests_count = len(pending_friend_docs)
+    # 3. Unread comments on my posts — count only, never the comment text itself
+    # 3. Unread comments on my posts — count only, never the comment text itself
+    # 3. Unread comments on my posts — count only, never the comment text itself
+    # 3. Unread comments on my posts — count only, never the comment text itself.
+    # ✨ FIX: wrapped in try/except. A single bad query here used to take
+    # down the ENTIRE /sync response (500), which silently killed chat
+    # badges, room invites, friend requests, the bell red dot, the
+    # home-screen badge, and the notification sound all at once — since
+    # every one of those is driven by this one polled endpoint.
+    unread_comment_count = 0
+    try:
+        my_posts_query = db_fs.collection('posts').where(
+            filter=firestore.FieldFilter("username", "==", clean_user)
+        ).get()
+        for post_doc in my_posts_query:
+            comment_docs = post_doc.reference.collection('comments').get()
+            unread_comment_count += sum(
+                1 for c in comment_docs
+                if (c.to_dict().get("username") or "").strip().lower() != clean_user
+            )
+    except Exception as e:
+        print(f"⚠️ /sync: unread_comment_count failed, defaulting to 0: {e}")
+        unread_comment_count = 0
+
+    # ✨ REMOVED: the collection_group("comments") reply-count query. It
+    # filtered on parent_id != None, which requires a manually-created
+    # Firestore composite index that was never provisioned — every call
+    # threw FailedPrecondition and crashed this whole endpoint. Replies
+    # still push an FCM notification (added in add_comment()), which
+    # uses a plain document read and needs no special index. If you want
+    # an in-app reply badge later, it should go through Firestore console
+    # to create the required index first, then be re-added defensively.
+
+    # 4. Pending INCOMING friend requests — count only.
+    pending_friend_requests_count = 0
+    try:
+        pending_friend_docs = db_fs.collection('users').document(clean_user).collection('friends').where(
+            filter=firestore.FieldFilter("status", "==", "incoming")
+        ).get()
+        pending_friend_requests_count = len(pending_friend_docs)
+    except Exception as e:
+        print(f"⚠️ /sync: pending_friend_requests failed, defaulting to 0: {e}")
+        pending_friend_requests_count = 0
 
     return {
         "chat_badges": chat_badges,
         "pending_room_invites": pending_invites_count,
         "unread_comment_count": unread_comment_count,
-        "unread_reply_count": unread_reply_count,  # ✨ NEW
         "pending_friend_requests": pending_friend_requests_count,
     }
-
 
 
 @app.get("/posts/{post_id}/comments")
