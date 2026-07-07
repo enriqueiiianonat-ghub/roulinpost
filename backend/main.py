@@ -455,6 +455,43 @@ def _purge_expired_posts():
 
     for doc in all_posts:
         d = doc.to_dict()
+        category = d.get("category", "feed")
+
+        # ✨ NEW: Marketplace listings run on their own renewal clock —
+        # renew within 7 days or it's purged on the 8th day. This
+        # completely bypasses the room_only-based 7/15-day rule below.
+        if category == "marketplace":
+            last_renewed = d.get("last_renewed_at")
+            if last_renewed is None:
+                # No renewal timestamp at all (e.g. legacy listing created
+                # before this feature) — fall back to its creation time.
+                ts = d.get("timestamp")
+                try:
+                    last_renewed = ts.timestamp()
+                except AttributeError:
+                    try:
+                        last_renewed = float(ts)
+                    except (TypeError, ValueError):
+                        continue
+            else:
+                try:
+                    last_renewed = float(last_renewed)
+                except (TypeError, ValueError):
+                    continue
+
+            if (now_ts - last_renewed) < MARKETPLACE_PURGE_GRACE_DAYS * 86400:
+                continue  # still within its renewal window — keep it
+
+            for url in d.get("image_urls", []):
+                delete_storage_blob_from_url(url)
+                media_purged += 1
+            for c_doc in doc.reference.collection('comments').get():
+                c_doc.reference.delete()
+            doc.reference.delete()
+            purged_count += 1
+            continue
+
+        # ── Original rule: feed / jobs / room-only posts ──
         ts = d.get("timestamp")
         if ts is None:
             continue
@@ -471,7 +508,6 @@ def _purge_expired_posts():
         if (now_ts - post_epoch) < expiry_days * 86400:
             continue
 
-        # Expired — purge Storage media, comments subcollection, then the post
         for url in d.get("image_urls", []):
             delete_storage_blob_from_url(url)
             media_purged += 1
@@ -802,8 +838,10 @@ def login(user: UserLogin):
         "city": u_data.get("city", ""),
         "gallery_visibility": u_data.get("gallery_visibility", "public"),
         "gallery_selected_viewers": u_data.get("gallery_selected_viewers", []),
-        "message_privacy": u_data.get("message_privacy", "public"),                    # ✨ NEW
-        "message_selected_senders": u_data.get("message_selected_senders", []),         # ✨ NEW
+        "message_privacy": u_data.get("message_privacy", "public"),
+        "message_selected_senders": u_data.get("message_selected_senders", []),
+        "landing_mode": u_data.get("landing_mode", "feed"),     # ✨ NEW
+        "default_room_id": u_data.get("default_room_id", ""),  # ✨ NEW
     }
 
 class ForgotPasswordRequest(BaseModel):
@@ -1016,26 +1054,27 @@ def delete_user_account(username: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/posts")
-
-
-def get_posts(request: Request, response: Response, limit: int = 10, offset: int = 0, username: Optional[str] = None):
-    cache_key = f"posts:{username or 'public'}:{limit}:{offset}"
+def get_posts(
+    request: Request,
+    response: Response,
+    limit: int = 10,
+    offset: int = 0,
+    username: Optional[str] = None,
+    category: Optional[str] = None,   # ✨ NEW: "marketplace" | "jobs" | None
+    keyword: Optional[str] = None,    # ✨ NEW: case-insensitive substring match on message
+):
+    clean_category = (category or "feed").strip().lower()
+    clean_keyword = (keyword or "").strip().lower()
+    cache_key = f"posts:{username or 'public'}:{clean_category}:{clean_keyword}:{limit}:{offset}"
     cached = api_cache_get(request, cache_key)
     if cached is not None:
         return cached
-    query = db_fs.collection('posts')
-    if username:
-        query = query.where(filter=firestore.FieldFilter("username", "==", username))
-    
-    docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
-    posts = []
+
     author_cache = {}
-    
-    for doc in docs:
-        d = doc.to_dict()
+
+    def build_post_dict(doc, d):
         author = d.get("username", "")
         post_id = doc.id
-
         if author not in author_cache:
             author_ref = db_fs.collection('users').document(author).get()
             if author_ref.exists:
@@ -1051,31 +1090,71 @@ def get_posts(request: Request, response: Response, limit: int = 10, offset: int
         comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
         comment_count = comments_ref.count().get()[0][0].value
 
-        posts.append({
+        return {
             "id": post_id,
             "username": author,
-            "user_avatar": author_cache[author]["avatar"], 
-            "author_country": author_cache[author]["country"], 
-            "author_city": author_cache[author]["city"],      
+            "user_avatar": author_cache[author]["avatar"],
+            "author_country": author_cache[author]["country"],
+            "author_city": author_cache[author]["city"],
             "message": d.get("message"),
-            "image_urls": d.get("image_urls", []), 
+            "image_urls": d.get("image_urls", []),
             "likes": d.get("likes", 0),
             "room_only": d.get("room_only", False),
+            "category": d.get("category", "feed"),
             "comment_count": comment_count,
-            "views": d.get("views", 0),  # ✨ NEW
-            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None 
-        })
-        
-    posts = [p for p in posts if not p.get("room_only", False)]
+            "views": d.get("views", 0),
+            "last_renewed_at": d.get("last_renewed_at"),  # ✨ NEW: marketplace only
+            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None
+        }
 
-    # ✨ NEW — ETag check
-    return api_cached_json_response(
-        request,
-        response,
-        cache_key,
-        posts,
-        ttl_seconds=15,
-    )
+    # ✨ NEW: Marketplace/Jobs tab or keyword search. Deliberately fetches
+    # ordered-by-timestamp and filters/paginates in Python rather than
+    # adding a category equality filter at the Firestore query level —
+    # equality + orderBy on a different field needs a manually-provisioned
+    # composite index, and an unprovisioned one is exactly what silently
+    # broke /sync earlier. This sidesteps that risk entirely.
+    if clean_category != "feed" or clean_keyword:
+        query = db_fs.collection('posts')
+        if username:
+            query = query.where(filter=firestore.FieldFilter("username", "==", username))
+        all_docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).get()
+
+        filtered_posts = []
+        for doc in all_docs:
+            d = doc.to_dict()
+            doc_category = d.get("category", "feed")
+            if clean_category != "feed" and doc_category != clean_category:
+                continue
+            if d.get("room_only", False):
+                continue
+            if clean_keyword and clean_keyword not in (d.get("message") or "").lower():
+                continue
+            filtered_posts.append(build_post_dict(doc, d))
+
+        paged_posts = filtered_posts[offset:offset + limit]
+        return api_cached_json_response(request, response, cache_key, paged_posts, ttl_seconds=15)
+
+    # ── Original fast path: plain feed, no category/keyword filtering ──
+    query = db_fs.collection('posts')
+    if username:
+        query = query.where(filter=firestore.FieldFilter("username", "==", username))
+
+    docs = query.order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
+    posts = []
+    for doc in docs:
+        d = doc.to_dict()
+        if d.get("room_only", False):
+            continue
+        # ✨ CHANGED: Marketplace/Jobs are ONLY visible on their own
+        # dedicated pages — not the universal feed, not room feeds, and
+        # not a user's profile wall either. This fast path only runs
+        # when clean_category == "feed" (see the branch above), so any
+        # post that isn't tagged "feed" is excluded unconditionally here.
+        if d.get("category", "feed") != "feed":
+            continue
+        posts.append(build_post_dict(doc, d))
+
+    return api_cached_json_response(request, response, cache_key, posts, ttl_seconds=15)
 
 @app.post("/posts")
 async def create_post(
@@ -1083,6 +1162,7 @@ async def create_post(
     message: Optional[str] = Form(None),
     target_room_id: Optional[str] = Form(None), 
     room_only: str = Form("false"), 
+    category: str = Form("feed"),  # ✨ NEW: "feed" | "marketplace" | "jobs"
     files: List[UploadFile] = File([])
 ):
     if len(files) > 12:
@@ -1094,6 +1174,9 @@ async def create_post(
             
     post_ref = db_fs.collection('posts').document()
     is_room_only = room_only.strip().lower() == "true"
+    clean_category = (category or "feed").strip().lower()
+    if clean_category not in ("feed", "marketplace", "jobs"):
+        clean_category = "feed"
 
     post_data = {
         'username': username,
@@ -1101,11 +1184,17 @@ async def create_post(
         'image_urls': media_urls, 
         'likes': 0,
         'room_only': is_room_only, 
+        'category': clean_category,
         'timestamp': firestore.SERVER_TIMESTAMP  
     }
     if target_room_id:
         post_data['target_room_id'] = target_room_id
-        
+
+    # ✨ NEW: Marketplace listings track their own renewal clock,
+    # independent of the room_only-based 7/15-day purge rule.
+    if clean_category == "marketplace":
+        post_data['last_renewed_at'] = int(time.time())
+
     post_ref.set(post_data)
     api_cache_clear("posts:")
     api_cache_clear(f"profile:{username.strip()}")
@@ -1155,6 +1244,33 @@ def like_post(post_id: str):
     return {"message": "Liked"}
 
 router = APIRouter()
+
+
+MARKETPLACE_RENEW_WINDOW_DAYS = 7
+MARKETPLACE_PURGE_GRACE_DAYS = 8  # purges on the 8th day if not renewed
+
+class RenewListingPayload(BaseModel):
+    username: str
+
+@app.post("/posts/{post_id}/renew")
+def renew_marketplace_listing(post_id: str, payload: RenewListingPayload):
+    post_ref = db_fs.collection('posts').document(post_id)
+    snap = post_ref.get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    post_data = snap.to_dict()
+    if post_data.get("category") != "marketplace":
+        raise HTTPException(status_code=400, detail="Only marketplace listings can be renewed")
+    if (post_data.get("username") or "").strip().lower() != payload.username.strip().lower():
+        raise HTTPException(status_code=403, detail="Only the listing owner can renew it")
+
+    now_ts = int(time.time())
+    post_ref.update({"last_renewed_at": now_ts})
+    api_cache_clear("posts:")
+    api_cache_clear(f"profile:{post_data.get('username', '').strip()}")
+    return {"status": "success", "last_renewed_at": now_ts}
+
 
 
 class PostViewPayload(BaseModel):
@@ -1880,9 +1996,38 @@ def add_profile_to_room(payload: RoomProfilePayload):
 def set_default_app_room(payload: RoomDefaultPayload):
     user_id = payload.username.strip().lower()
     db_fs.collection('users').document(user_id).update({
-        "default_room_id": payload.room_id
+        "default_room_id": payload.room_id,
+        # ✨ NEW: keep landing_mode in sync so a room default doesn't
+        # conflict with a previously-set Marketplace/Jobs default.
+        "landing_mode": "room" if payload.room_id else "feed",
     })
     return {"status": "success"}
+
+
+class LandingModePayload(BaseModel):
+    username: str
+    landing_mode: str  # "feed" | "marketplace" | "jobs"
+
+@app.post("/users/set-landing-mode")
+def set_landing_mode(payload: LandingModePayload):
+    """
+    ✨ NEW: sets Marketplace or Jobs (or plain feed) as the page shown
+    right after login — parallel to /rooms/set-default but for the two
+    new non-room browsing modes. Clears any default room, since only one
+    landing mode can be active at a time.
+    """
+    clean_user = payload.username.strip().lower()
+    mode = payload.landing_mode.strip().lower()
+    if mode not in ("feed", "marketplace", "jobs"):
+        raise HTTPException(status_code=400, detail="Invalid landing mode")
+
+    db_fs.collection('users').document(clean_user).update({
+        "landing_mode": mode,
+        "default_room_id": "",
+    })
+    return {"status": "success"}
+
+
 
 @app.get("/posts/room/{username}/{room_id}")
 def get_room_filtered_posts(
@@ -1930,6 +2075,11 @@ def get_room_filtered_posts(
     for doc in docs:
         d = doc.to_dict()
         author = d.get("username", "")
+
+        # ✨ NEW: Marketplace/Jobs never appear inside room feeds — those
+        # categories are confined strictly to their own dedicated pages.
+        if d.get("category", "feed") != "feed":
+            continue
 
         if selected_profile:
             if author != selected_profile:
