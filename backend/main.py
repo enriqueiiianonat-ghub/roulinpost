@@ -800,8 +800,10 @@ def login(user: UserLogin):
         "profile_url": u_data.get("profile_url", ""),
         "country": u_data.get("country", ""),  
         "city": u_data.get("city", ""),
-        "gallery_visibility": u_data.get("gallery_visibility", "public"),        # ✨ NEW
-        "gallery_selected_viewers": u_data.get("gallery_selected_viewers", []),  # ✨ NEW
+        "gallery_visibility": u_data.get("gallery_visibility", "public"),
+        "gallery_selected_viewers": u_data.get("gallery_selected_viewers", []),
+        "message_privacy": u_data.get("message_privacy", "public"),                    # ✨ NEW
+        "message_selected_senders": u_data.get("message_selected_senders", []),         # ✨ NEW
     }
 
 class ForgotPasswordRequest(BaseModel):
@@ -855,8 +857,10 @@ async def update_profile(
     city: Optional[str] = Form(""),     
     new_password: Optional[str] = Form(None),
     avatar_file: Optional[UploadFile] = File(None),
-    gallery_visibility: Optional[str] = Form(None),        # ✨ NEW: "public" | "friends" | "selected"
-    gallery_selected_viewers: Optional[str] = Form(None),   # ✨ NEW: JSON-encoded list of usernames
+    gallery_visibility: Optional[str] = Form(None),          # "public" | "friends" | "selected"
+    gallery_selected_viewers: Optional[str] = Form(None),     # JSON-encoded list of usernames
+    message_privacy: Optional[str] = Form(None),              # ✨ NEW: "public" | "friends" | "selected"
+    message_selected_senders: Optional[str] = Form(None),      # ✨ NEW: JSON-encoded list of usernames
 ):
     padding_current = current_username.strip().lower()
     clean_new = new_username.strip().lower()
@@ -884,6 +888,7 @@ async def update_profile(
     user_data['city'] = city or ""
 
     # ✨ NEW: "Who can see my photo in gallery"
+    # "Who can see my photo in gallery"
     if gallery_visibility is not None:
         clean_visibility = gallery_visibility.strip().lower()
         if clean_visibility in ("public", "friends", "selected"):
@@ -897,6 +902,19 @@ async def update_profile(
         except Exception:
             pass
 
+    # ✨ NEW: "Who can send me a message"
+    if message_privacy is not None:
+        clean_msg_privacy = message_privacy.strip().lower()
+        if clean_msg_privacy in ("public", "friends", "selected"):
+            user_data['message_privacy'] = clean_msg_privacy
+    if message_selected_senders is not None:
+        try:
+            parsed_senders = py_json.loads(message_selected_senders)
+            user_data['message_selected_senders'] = [
+                str(v).strip().lower() for v in parsed_senders if str(v).strip()
+            ]
+        except Exception:
+            pass
 
     if clean_new != padding_current:
         new_ref = db_fs.collection('users').document(clean_new)
@@ -944,8 +962,10 @@ async def update_profile(
             "profile_url": user_data.get("profile_url", ""),
             "country": user_data['country'],
             "city": user_data['city'],
-            "gallery_visibility": user_data.get("gallery_visibility", "public"),        # ✨ NEW
-            "gallery_selected_viewers": user_data.get("gallery_selected_viewers", []),  # ✨ NEW
+            "gallery_visibility": user_data.get("gallery_visibility", "public"),
+            "gallery_selected_viewers": user_data.get("gallery_selected_viewers", []),
+            "message_privacy": user_data.get("message_privacy", "public"),                    # ✨ NEW
+            "message_selected_senders": user_data.get("message_selected_senders", []),         # ✨ NEW
         }
 
     user_data['email'] = new_email
@@ -958,8 +978,10 @@ async def update_profile(
         "profile_url": user_data.get("profile_url", ""),
         "country": user_data['country'],
         "city": user_data['city'],
-        "gallery_visibility": user_data.get("gallery_visibility", "public"),        # ✨ NEW
-        "gallery_selected_viewers": user_data.get("gallery_selected_viewers", []),  # ✨ NEW
+        "gallery_visibility": user_data.get("gallery_visibility", "public"),
+        "gallery_selected_viewers": user_data.get("gallery_selected_viewers", []),
+        "message_privacy": user_data.get("message_privacy", "public"),                    # ✨ NEW
+        "message_selected_senders": user_data.get("message_selected_senders", []),         # ✨ NEW
     }
 
 @app.delete("/auth/profile/{username}")
@@ -1174,11 +1196,43 @@ def get_conversation_id(user1: str, user2: str) -> str:
     sorted_users = sorted([user1.lower().strip(), user2.lower().strip()])
     return f"{sorted_users[0]}_{sorted_users[1]}"
 
+# ✨ NEW: "Who can send me a message" gate — mirrors the gallery visibility
+# pattern (public | friends | selected).
+def _can_send_message(sender: str, recipient: str) -> bool:
+    clean_sender = sender.strip().lower()
+    clean_recipient = recipient.strip().lower()
+    if clean_sender == clean_recipient:
+        return True  # never blocks messaging yourself, though the UI shouldn't offer this anyway
+
+    recipient_snap = db_fs.collection('users').document(clean_recipient).get()
+    if not recipient_snap.exists:
+        return True  # let the 404 elsewhere handle a nonexistent user; don't silently swallow it here
+
+    recipient_data = recipient_snap.to_dict()
+    privacy = recipient_data.get("message_privacy", "public")
+
+    if privacy == "public":
+        return True
+    if privacy == "friends":
+        friend_snap = db_fs.collection('users').document(clean_recipient).collection('friends').document(clean_sender).get()
+        return friend_snap.exists and friend_snap.to_dict().get("status") == "accepted"
+    if privacy == "selected":
+        allowed = set(recipient_data.get("message_selected_senders", []))
+        return clean_sender in allowed
+    return True
+
 @app.post("/chat/send")
 def send_direct_message(payload: ChatMessageSchema):
     if not payload.text.strip() and not payload.media_url:
         raise HTTPException(status_code=400, detail="Message body or media attachment required.")
-        
+
+    # ✨ NEW: "Who can send me a message" enforcement
+    if not _can_send_message(payload.sender, payload.recipient):
+        raise HTTPException(
+            status_code=403,
+            detail=f"@{payload.recipient.strip()} isn't accepting messages from you right now."
+        )
+
     conv_id = get_conversation_id(payload.sender, payload.recipient)
     now_ts = int(time.time())
     
