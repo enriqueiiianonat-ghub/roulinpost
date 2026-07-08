@@ -1343,20 +1343,36 @@ def send_direct_message(payload: ChatMessageSchema):
     if not payload.text.strip() and not payload.media_url:
         raise HTTPException(status_code=400, detail="Message body or media attachment required.")
 
-    # ✨ NEW: Marketplace/Jobs listings always allow messaging the seller
-    # or employer, even if their personal "Who Can Send Me A Message"
-    # setting would otherwise block it. This only bypasses the privacy
-    # gate when context_post_id genuinely points at a marketplace/jobs
-    # post authored by the recipient — a client can't just pass an
-    # arbitrary flag to skip the check for ordinary chat.
-    bypass_privacy = False
-    if payload.context_post_id:
+    conv_id = get_conversation_id(payload.sender, payload.recipient)
+    chat_room_ref = db_fs.collection('chats').document(conv_id)
+    chat_snap = chat_room_ref.get()
+    existing_chat_data = chat_snap.to_dict() if chat_snap.exists else {}
+
+    # ✨ FIX: Marketplace/Jobs listings always allow messaging the seller
+    # or employer, even if a personal "Who Can Send Me A Message" setting
+    # would otherwise block it — and this now applies to BOTH directions
+    # of the conversation, not just the inquirer's first message.
+    #
+    # Previously the bypass only checked context_post_id on THIS message —
+    # so when the inquirer's first message included it, they got through
+    # fine, but when the seller/employer replied (their client has no
+    # reason to attach context_post_id on a reply), _can_send_message fell
+    # back to checking the INQUIRER's privacy setting and could 403 the
+    # seller's own reply. Now the chat thread itself remembers it was
+    # started from a listing, so every message after that — either way —
+    # bypasses the check.
+    bypass_privacy = existing_chat_data.get("is_listing_conversation", False)
+    listing_context_post_id = existing_chat_data.get("listing_context_post_id")
+
+    if not bypass_privacy and payload.context_post_id:
         context_snap = db_fs.collection('posts').document(payload.context_post_id).get()
         if context_snap.exists:
             context_data = context_snap.to_dict()
             same_author = (context_data.get("username") or "").strip().lower() == payload.recipient.strip().lower()
             is_listing_category = context_data.get("category") in ("marketplace", "jobs")
-            bypass_privacy = same_author and is_listing_category
+            if same_author and is_listing_category:
+                bypass_privacy = True
+                listing_context_post_id = payload.context_post_id
 
     if not bypass_privacy and not _can_send_message(payload.sender, payload.recipient):
         raise HTTPException(
@@ -1364,15 +1380,20 @@ def send_direct_message(payload: ChatMessageSchema):
             detail=f"@{payload.recipient.strip()} isn't accepting messages from you right now."
         )
 
-    conv_id = get_conversation_id(payload.sender, payload.recipient)
     now_ts = int(time.time())
-    
-    chat_room_ref = db_fs.collection('chats').document(conv_id)
-    chat_room_ref.set({
+
+    chat_update = {
         "participants": [payload.sender, payload.recipient],
         "last_message": "[Media File]" if not payload.text.strip() else payload.text,
         "last_updated": now_ts
-    }, merge=True)
+    }
+    # ✨ NEW: persist the listing link on the thread itself, once established,
+    # so future replies in either direction keep bypassing the privacy check.
+    if bypass_privacy and listing_context_post_id:
+        chat_update["is_listing_conversation"] = True
+        chat_update["listing_context_post_id"] = listing_context_post_id
+
+    chat_room_ref.set(chat_update, merge=True)
     
     message_ref = chat_room_ref.collection('messages').document()
     message_ref.set({
