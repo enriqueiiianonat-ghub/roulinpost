@@ -1156,6 +1156,92 @@ def get_posts(
 
     return api_cached_json_response(request, response, cache_key, posts, ttl_seconds=15)
 
+
+
+@app.get("/posts/my-activity/{username}")
+def get_my_posting_activity(username: str, viewer_username: str, limit: int = 10, offset: int = 0):
+    """
+    ✨ NEW: personal "memory" feed. The profile owner viewing their OWN
+    wall sees every post they've ever made across every context — public
+    feed, every room, Marketplace, Jobs — each tagged with WHERE it was
+    posted and WHEN, bypassing the usual room_only/category restrictions.
+    Locked to viewer_username == username so nobody else can pull this
+    unrestricted view of another account's private room posts.
+    """
+    clean_user = username.strip().lower()
+    clean_viewer = viewer_username.strip().lower()
+    if clean_viewer != clean_user:
+        raise HTTPException(status_code=403, detail="Only the account owner can view their own activity log.")
+
+    docs = db_fs.collection('posts').where(
+        filter=firestore.FieldFilter("username", "==", username.strip())
+    ).order_by("timestamp", direction=firestore.Query.DESCENDING).offset(offset).limit(limit).get()
+
+    user_snap = db_fs.collection('users').document(clean_user).get()
+    user_data = user_snap.to_dict() if user_snap.exists else {}
+    avatar = user_data.get("profile_url", "")
+    author_country = user_data.get("country", "")
+    author_city = user_data.get("city", "")
+
+    # Cache room names per room_id so repeat posts in the same room don't
+    # each trigger a separate Firestore read.
+    room_name_cache = {}
+
+    def resolve_room_name(room_id):
+        if not room_id:
+            return None
+        if room_id in room_name_cache:
+            return room_name_cache[room_id]
+        room_snap = db_fs.collection('users').document(clean_user).collection('rooms').document(room_id).get()
+        name = room_snap.to_dict().get("name") if room_snap.exists else None
+        room_name_cache[room_id] = name
+        return name
+
+    posts = []
+    for doc in docs:
+        d = doc.to_dict()
+        post_id = doc.id
+        category = d.get("category", "feed")
+        is_room_only = d.get("room_only", False)
+        target_room_id = d.get("target_room_id", "")
+
+        if category == "marketplace":
+            activity_label = "Marketplace"
+        elif category == "jobs":
+            activity_label = "Jobs"
+        elif is_room_only and target_room_id:
+            room_name = resolve_room_name(target_room_id)
+            activity_label = f"Room: {room_name}" if room_name else "a Room"
+        else:
+            activity_label = "Universal Feed"
+
+        comments_ref = db_fs.collection('posts').document(post_id).collection('comments')
+        comment_count = comments_ref.count().get()[0][0].value
+
+        posts.append({
+            "id": post_id,
+            "username": username.strip(),
+            "user_avatar": avatar,
+            "author_country": author_country,
+            "author_city": author_city,
+            "message": d.get("message"),
+            "image_urls": d.get("image_urls", []),
+            "likes": d.get("likes", 0),
+            "room_only": is_room_only,
+            "category": category,
+            "target_room_id": target_room_id,
+            "comment_count": comment_count,
+            "views": d.get("views", 0),
+            "last_renewed_at": d.get("last_renewed_at"),
+            "activity_label": activity_label,  # ✨ NEW
+            "timestamp": str(d.get("timestamp")) if d.get("timestamp") else None,
+        })
+
+    return posts
+
+
+
+
 @app.post("/posts")
 async def create_post(
     username: str = Form(...),
