@@ -1306,7 +1306,8 @@ class ChatMessageSchema(BaseModel):
     sender: str
     recipient: str
     text: str
-    media_url: Optional[str] = None 
+    media_url: Optional[str] = None
+    context_post_id: Optional[str] = None  # ✨ NEW: set when messaging from a Marketplace/Jobs listing
 
 def get_conversation_id(user1: str, user2: str) -> str:
     sorted_users = sorted([user1.lower().strip(), user2.lower().strip()])
@@ -1342,8 +1343,22 @@ def send_direct_message(payload: ChatMessageSchema):
     if not payload.text.strip() and not payload.media_url:
         raise HTTPException(status_code=400, detail="Message body or media attachment required.")
 
-    # ✨ NEW: "Who can send me a message" enforcement
-    if not _can_send_message(payload.sender, payload.recipient):
+    # ✨ NEW: Marketplace/Jobs listings always allow messaging the seller
+    # or employer, even if their personal "Who Can Send Me A Message"
+    # setting would otherwise block it. This only bypasses the privacy
+    # gate when context_post_id genuinely points at a marketplace/jobs
+    # post authored by the recipient — a client can't just pass an
+    # arbitrary flag to skip the check for ordinary chat.
+    bypass_privacy = False
+    if payload.context_post_id:
+        context_snap = db_fs.collection('posts').document(payload.context_post_id).get()
+        if context_snap.exists:
+            context_data = context_snap.to_dict()
+            same_author = (context_data.get("username") or "").strip().lower() == payload.recipient.strip().lower()
+            is_listing_category = context_data.get("category") in ("marketplace", "jobs")
+            bypass_privacy = same_author and is_listing_category
+
+    if not bypass_privacy and not _can_send_message(payload.sender, payload.recipient):
         raise HTTPException(
             status_code=403,
             detail=f"@{payload.recipient.strip()} isn't accepting messages from you right now."
